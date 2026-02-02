@@ -20,6 +20,66 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 file_lock = threading.Lock()
 
 
+def normalize_card_format(card_input):
+    """
+    Normalize card format to number|mm|yy|cvv
+    Supports:
+    - 5401683112957490|10|2029|741 (pipe-separated)
+    - 4284303806640816 0628 116 (space-separated with mmyy)
+    """
+    card_input = card_input.strip()
+
+    # Check if already in pipe format
+    if '|' in card_input:
+        parts = card_input.split('|')
+        if len(parts) == 4:
+            number, mm, yy, cvv = parts
+            # Normalize year to 4 digits
+            if len(yy) == 2:
+                yy = '20' + yy
+            return f"{number}|{mm}|{yy}|{cvv}"
+        return None
+
+    # Handle space-separated format: number mmyy cvv
+    parts = card_input.split()
+    if len(parts) == 3:
+        number, mmyy, cvv = parts
+        if len(mmyy) == 4:
+            mm = mmyy[:2]
+            yy = '20' + mmyy[2:]
+            return f"{number}|{mm}|{yy}|{cvv}"
+
+    return None
+
+
+def check_single_card(card_details):
+    """
+    Check a single card using PPCP gateway.
+
+    Args:
+        card_details (str): Card in format 'number|mm|yy|cvv'
+
+    Returns:
+        str: Formatted response result
+    """
+    # Load sites from sites.txt file
+    sites = []
+    if os.path.exists('ppcp/sites.txt'):
+        with open('ppcp/sites.txt', 'r') as f:
+            sites = [line.strip() for line in f if line.strip()]
+    else:
+        # Load from the project root if ppcp folder is not present in the path
+        if os.path.exists('sites.txt'):
+            with open('sites.txt', 'r') as f:
+                sites = [line.strip() for line in f if line.strip()]
+
+    if not sites:
+        return "❌ No sites found!"
+
+    # Use the existing check_ppcp_card function
+    return check_ppcp_card(card_details, sites)
+
+
 class Config:
     """Configuration settings"""
     TELEGRAM_TOKEN = "7723561160:AAHZp0guO69EmC_BumauDsDeseTvh7GY3qA"
