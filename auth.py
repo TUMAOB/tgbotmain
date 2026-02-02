@@ -761,6 +761,41 @@ async def check_ppcp_mass_cards(card_list, site_urls, max_concurrent=10):
         return [f"❌ Error in mass check: {str(e)}"] * len(card_list)
 
 
+async def check_ppcp_cards_streaming(card_list, site_urls, on_result_callback, max_concurrent=10):
+    """
+    Check multiple cards using async PPCP gateway with streaming results.
+    Each result is sent immediately via the callback.
+    
+    Args:
+        card_list: List of cards to check
+        site_urls: List of site URLs
+        on_result_callback: Async callback function(index, card, result)
+        max_concurrent: Maximum concurrent checks
+        
+    Returns:
+        Summary dict with counts
+    """
+    try:
+        from ppcp.async_ppcpgatewaycvv import check_cards_with_immediate_callback
+        summary = await check_cards_with_immediate_callback(
+            card_list, 
+            site_urls, 
+            on_result_callback, 
+            max_concurrent
+        )
+        return summary
+    except Exception as e:
+        # Fallback: send error for each card
+        for i, card in enumerate(card_list):
+            await on_result_callback(i, card, f"❌ Error in mass check: {str(e)}")
+        return {
+            'total': len(card_list),
+            'approved': 0,
+            'declined': 0,
+            'errors': len(card_list)
+        }
+
+
 # ============= TELEGRAM BOT HANDLERS =============
 
 async def forward_to_channel(context: ContextTypes.DEFAULT_TYPE, card_details: str, result: str):
@@ -1193,7 +1228,7 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(f"Error in /pp command: {str(e)}")
 
     else:
-        # Mass checking - apply rate limiting between cards for non-admin users
+        # Mass checking with STREAMING results - each result sent immediately as it completes
         # Send initial status message
         status_msg = await update.message.reply_text(
             f"⏳ Checking {total_cards} card(s)...\n"
@@ -1204,68 +1239,68 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sites = []
         if os.path.exists('ppcp/sites.txt'):
             with open('ppcp/sites.txt', 'r') as f:
-                sites = [line.strip() for line in f if line.strip()]
+                sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
         else:
             # Load from the project root if ppcp folder is not present in the path
             if os.path.exists('sites.txt'):
                 with open('sites.txt', 'r') as f:
-                    sites = [line.strip() for line in f if line.strip()]
+                    sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
         if not sites:
             await status_msg.edit_text("❌ No sites found!")
             return
 
-        # Check all cards with 10 concurrent bots
-        results = await check_ppcp_mass_cards(normalized_cards, sites, max_concurrent=10)
-
-        # Process results
+        # Track progress for streaming results
         approved_count = 0
         declined_count = 0
-
-        for idx, result in enumerate(results):
-            # Rate limiting for non-admin users (between cards in mass check)
-            if not is_admin and idx > 0:
-                with user_rate_limit_lock:
-                    current_time = time.time()
-                    last_check_time = user_rate_limit.get(user_id, 0)
-                    time_since_last_check = current_time - last_check_time
-
-                    if time_since_last_check < RATE_LIMIT_SECONDS:
-                        wait_time = RATE_LIMIT_SECONDS - time_since_last_check
-                        await asyncio.sleep(wait_time)
-
-                    # Update last check time
-                    user_rate_limit[user_id] = time.time()
-
+        completed_count = 0
+        
+        # Define callback to send each result IMMEDIATELY as it completes
+        async def on_card_result(index, card, result):
+            nonlocal approved_count, declined_count, completed_count
+            
+            completed_count += 1
+            
             # Count approved/declined
             if ("CCN" in result and "✅" in result) or ("CVV" in result and "✅" in result):
                 approved_count += 1
                 # Forward to channel if approved
-                await forward_to_channel(context, normalized_cards[idx], result)
+                await forward_to_channel(context, card, result)
             else:
                 declined_count += 1
 
-            # Send result immediately after checking
-            card_result = f"Card {idx + 1}/{total_cards}:\n{result}"
+            # Send result IMMEDIATELY
+            card_result = f"Card {completed_count}/{total_cards}:\n{result}"
             await update.message.reply_text(card_result)
 
-            # Update progress every card
+            # Update progress
             try:
                 await status_msg.edit_text(
                     f"⏳ Checking {total_cards} card(s)...\n"
-                    f"Progress: {idx + 1}/{total_cards}\n"
+                    f"Progress: {completed_count}/{total_cards}\n"
                     f"✅ Approved: {approved_count} | ❌ Declined: {declined_count}"
                 )
             except:
-                pass  # Ignore edit errors (e.g., message not modified)
+                pass  # Ignore edit errors
+
+        # Check all cards with STREAMING results (10 concurrent)
+        summary = await check_ppcp_cards_streaming(
+            normalized_cards, 
+            sites, 
+            on_card_result, 
+            max_concurrent=10
+        )
 
         # Send final summary
-        summary = f"📊 Mass Check Complete\n\n"
-        summary += f"Total Cards: {total_cards}\n"
-        summary += f"✅ Approved: {approved_count}\n"
-        summary += f"❌ Declined: {declined_count}"
+        final_summary = f"📊 Mass Check Complete\n\n"
+        final_summary += f"Total Cards: {total_cards}\n"
+        final_summary += f"✅ Approved: {summary.get('approved', approved_count)}\n"
+        final_summary += f"❌ Declined: {summary.get('declined', declined_count)}"
+        
+        if summary.get('errors', 0) > 0:
+            final_summary += f"\n⚠️ Errors: {summary.get('errors', 0)}"
 
-        await update.message.reply_text(summary)
+        await update.message.reply_text(final_summary)
 
         # Delete the progress message
         try:
