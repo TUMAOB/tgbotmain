@@ -175,10 +175,10 @@ class BinChecker:
         # Try multiple APIs in order
         result = None
         
-        # Try binlist.net first (most reliable, free API)
-        result = await BinChecker._check_binlist(bin_number, ua)
+        # Try antipublic.cc first (same as /b3 command)
+        result = await BinChecker._check_antipublic(bin_number, ua)
         
-        # If binlist failed, try bincheck.io
+        # If antipublic failed, try bincheck.io
         if not result or result.get('brand') == 'Unknown':
             result_bincheck = await BinChecker._check_bincheck(bin_number, ua)
             if result_bincheck and result_bincheck.get('brand') != 'Unknown':
@@ -209,10 +209,10 @@ class BinChecker:
         return result
 
     @staticmethod
-    async def _check_binlist(bin_number: str, ua: str) -> Optional[Dict[str, str]]:
-        """Check BIN using binlist.net API (free, no auth required)"""
+    async def _check_antipublic(bin_number: str, ua: str) -> Optional[Dict[str, str]]:
+        """Check BIN using bins.antipublic.cc API (same as /b3 command)"""
         try:
-            url = f'https://lookup.binlist.net/{bin_number}'
+            url = f'https://bins.antipublic.cc/bins/{bin_number}'
             headers = {
                 'user-agent': ua,
                 'accept': 'application/json',
@@ -228,38 +228,59 @@ class BinChecker:
                     if response.status == 200:
                         data = await response.json()
                         
-                        # Extract brand/scheme
-                        brand = data.get('scheme', 'Unknown')
-                        if brand:
-                            brand = brand.upper()
-                        
-                        # Extract type (debit/credit)
-                        card_type = data.get('type', 'Unknown')
-                        if card_type:
-                            card_type = card_type.upper()
-                        
-                        # Extract level/brand
-                        level = data.get('brand', 'Unknown')
-                        if level:
-                            level = level.upper()
-                        
-                        # Extract bank/issuer
-                        bank_data = data.get('bank', {})
-                        issuer = bank_data.get('name', 'Unknown') if bank_data else 'Unknown'
-                        
-                        # Extract country
-                        country_data = data.get('country', {})
-                        country = country_data.get('name', 'Unknown') if country_data else 'Unknown'
-                        
-                        return {
-                            'brand': brand or 'Unknown',
-                            'type': card_type or 'Unknown',
-                            'level': level or 'Unknown',
-                            'issuer': issuer or 'Unknown',
-                            'country': country or 'Unknown'
-                        }
+                        if data:
+                            # Extract and normalize card type
+                            raw_type = (data.get('type') or data.get('card_type') or '').lower().strip()
+                            if 'debit' in raw_type:
+                                card_type = 'DEBIT'
+                            elif 'credit' in raw_type:
+                                card_type = 'CREDIT'
+                            else:
+                                card_type = 'Unknown'
+                            
+                            # Extract and normalize brand
+                            raw_brand = data.get('brand') or data.get('card_brand') or data.get('card') or ''
+                            if raw_brand:
+                                raw_brand_lower = raw_brand.lower()
+                                if 'visa' in raw_brand_lower:
+                                    brand = 'VISA'
+                                elif 'mastercard' in raw_brand_lower or 'master' in raw_brand_lower:
+                                    brand = 'MASTERCARD'
+                                elif 'amex' in raw_brand_lower or 'american express' in raw_brand_lower:
+                                    brand = 'AMEX'
+                                elif 'discover' in raw_brand_lower:
+                                    brand = 'DISCOVER'
+                                else:
+                                    brand = raw_brand.upper()
+                            else:
+                                brand = 'Unknown'
+                            
+                            # Extract level
+                            level = data.get('level') or data.get('card_level') or 'Unknown'
+                            if level and level != 'Unknown':
+                                level = level.upper()
+                            
+                            # Extract bank/issuer
+                            if isinstance(data.get('bank'), dict):
+                                issuer = data.get('bank', {}).get('name') or 'Unknown'
+                            else:
+                                issuer = data.get('bank') or data.get('issuer') or data.get('bank_name') or 'Unknown'
+                            
+                            # Extract country
+                            if isinstance(data.get('country'), dict):
+                                country = data.get('country', {}).get('name') or 'Unknown'
+                            else:
+                                country = data.get('country') or data.get('country_name') or 'Unknown'
+                            
+                            return {
+                                'brand': brand or 'Unknown',
+                                'type': card_type or 'Unknown',
+                                'level': level or 'Unknown',
+                                'issuer': issuer or 'Unknown',
+                                'country': country or 'Unknown'
+                            }
         except Exception as e:
-            logger.debug(f"binlist.net check failed for {bin_number}: {e}")
+            logger.debug(f"bins.antipublic.cc check failed for {bin_number}: {e}")
         return None
 
     @staticmethod

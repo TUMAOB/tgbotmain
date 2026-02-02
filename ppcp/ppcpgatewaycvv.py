@@ -188,45 +188,81 @@ class TelegramNotifier:
 
 
 class BinChecker:
-    """Check BIN information"""
+    """Check BIN information using bins.antipublic.cc API (same as /b3 command)"""
     
     @staticmethod
     def check(bin_number: str, ua: str) -> Dict[str, str]:
-        """Get BIN information"""
+        """Get BIN information from bins.antipublic.cc"""
         try:
-            url = f'https://bincheck.io/details/{bin_number}'
+            url = f'https://bins.antipublic.cc/bins/{bin_number}'
             headers = {
                 'user-agent': ua,
-                'referer': 'https://bincheck.io/',
+                'accept': 'application/json',
                 'accept-language': 'en-US,en;q=0.9'
             }
             response = requests.get(url, headers=headers, timeout=10, verify=False)
-            html = response.text
             
-            # Parse BIN info
-            card_brand = BinChecker._extract_field(html, 'Card\\s*Brand')
-            card_type = BinChecker._extract_field(html, 'Card\\s*Type')
-            card_level = BinChecker._extract_field(html, 'Card\\s*Level')
-            
-            # Extract issuer
-            issuer_match = re.search(r'<td[^>]*>\s*Issuer\s*Name\s*/\s*Bank\s*</td>\s*<td[^>]*>.*?<a[^>]*title="([^"]+)"', html, re.I)
-            issuer_name = issuer_match.group(1).strip() if issuer_match else 'Unknown'
-            issuer_name = re.sub(r'^Complete\s*', '', issuer_name, flags=re.I)
-            issuer_name = re.sub(r'\s*database.*$', '', issuer_name, flags=re.I)
-            issuer_name = re.sub(r'\s*-\s*[A-Z\s]+$', '', issuer_name, flags=re.I)
-            
-            # Extract country
-            country_match = re.search(r'<td[^>]*>\s*ISO\s*Country\s*Name\s*</td>\s*<td[^>]*>.*?<a[^>]*title="([^"]+)"', html, re.I)
-            iso_country = country_match.group(1).strip() if country_match else 'Unknown'
-            iso_country = re.sub(r'^Complete\s*', '', iso_country, flags=re.I)
-            iso_country = re.sub(r'\s*database.*$', '', iso_country, flags=re.I)
+            if response.status_code == 200 and response.text:
+                data = response.json()
+                
+                if data:
+                    # Extract and normalize card type
+                    raw_type = (data.get('type') or data.get('card_type') or '').lower().strip()
+                    if 'debit' in raw_type:
+                        card_type = 'DEBIT'
+                    elif 'credit' in raw_type:
+                        card_type = 'CREDIT'
+                    else:
+                        card_type = 'Unknown'
+                    
+                    # Extract and normalize brand
+                    raw_brand = data.get('brand') or data.get('card_brand') or data.get('card') or ''
+                    if raw_brand:
+                        raw_brand_lower = raw_brand.lower()
+                        if 'visa' in raw_brand_lower:
+                            brand = 'VISA'
+                        elif 'mastercard' in raw_brand_lower or 'master' in raw_brand_lower:
+                            brand = 'MASTERCARD'
+                        elif 'amex' in raw_brand_lower or 'american express' in raw_brand_lower:
+                            brand = 'AMEX'
+                        elif 'discover' in raw_brand_lower:
+                            brand = 'DISCOVER'
+                        else:
+                            brand = raw_brand.upper()
+                    else:
+                        brand = 'Unknown'
+                    
+                    # Extract level
+                    level = data.get('level') or data.get('card_level') or 'Unknown'
+                    if level and level != 'Unknown':
+                        level = level.upper()
+                    
+                    # Extract bank/issuer
+                    if isinstance(data.get('bank'), dict):
+                        issuer = data.get('bank', {}).get('name') or 'Unknown'
+                    else:
+                        issuer = data.get('bank') or data.get('issuer') or data.get('bank_name') or 'Unknown'
+                    
+                    # Extract country
+                    if isinstance(data.get('country'), dict):
+                        country = data.get('country', {}).get('name') or 'Unknown'
+                    else:
+                        country = data.get('country') or data.get('country_name') or 'Unknown'
+                    
+                    return {
+                        'brand': brand or 'Unknown',
+                        'type': card_type or 'Unknown',
+                        'level': level or 'Unknown',
+                        'issuer': issuer or 'Unknown',
+                        'country': country or 'Unknown'
+                    }
             
             return {
-                'brand': card_brand,
-                'type': card_type,
-                'level': card_level,
-                'issuer': issuer_name,
-                'country': iso_country
+                'brand': 'Unknown',
+                'type': 'Unknown',
+                'level': 'Unknown',
+                'issuer': 'Unknown',
+                'country': 'Unknown'
             }
         except Exception as e:
             return {
@@ -239,7 +275,7 @@ class BinChecker:
     
     @staticmethod
     def _extract_field(html: str, field_name: str) -> str:
-        """Extract field from HTML"""
+        """Extract field from HTML (kept for backward compatibility)"""
         pattern = f'<td[^>]*>\\s*{field_name}\\s*</td>\\s*<td[^>]*>\\s*(.*?)\\s*</td>'
         match = re.search(pattern, html, re.I)
         return match.group(1).strip() if match else 'Unknown'
