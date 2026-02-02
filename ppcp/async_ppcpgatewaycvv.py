@@ -7,6 +7,8 @@ Features:
 - Streaming results for mass checking
 - Connection pooling and rate limiting
 - Optimized for fast production use
+- Empty response detection with retry logic
+- Multiple BIN lookup APIs with fallback
 """
 import asyncio
 import aiohttp
@@ -92,7 +94,7 @@ class AddressData:
             {'street': '123 Sukhumvit Road', 'city': 'Bangkok', 'zip': '10110', 'state': 'Bangkok', 'phone': '(+66) 2-123-4567'},
         ],
         'HK': [
-            {'street': '1 Queen\'s Road Central', 'city': 'Central', 'zip': '', 'state': 'Hong Kong Island', 'phone': '(+852) 2523-1234'},
+            {'street': "1 Queen's Road Central", 'city': 'Central', 'zip': '', 'state': 'Hong Kong Island', 'phone': '(+852) 2523-1234'},
         ],
         'ZA': [
             {'street': '10 Adderley Street', 'city': 'Cape Town', 'zip': '8000', 'state': 'Western Cape', 'phone': '(+27) 21-123-4567'},
@@ -154,12 +156,13 @@ class TelegramNotifier:
         except Exception as e:
             logger.error(f"Telegram error: {e}")
 
+
 class BinChecker:
-    """Check BIN information with caching"""
+    """Check BIN information with caching and multiple fallback APIs"""
 
     @staticmethod
     async def check(bin_number: str, ua: str) -> Dict[str, str]:
-        """Get BIN information with caching"""
+        """Get BIN information with caching and multiple fallback APIs"""
         global _bin_cache
         
         # Check cache first
@@ -169,6 +172,99 @@ class BinChecker:
             if time.time() - cache_entry['timestamp'] < 3600:
                 return cache_entry['data']
         
+        # Try multiple APIs in order
+        result = None
+        
+        # Try binlist.net first (most reliable, free API)
+        result = await BinChecker._check_binlist(bin_number, ua)
+        
+        # If binlist failed, try bincheck.io
+        if not result or result.get('brand') == 'Unknown':
+            result_bincheck = await BinChecker._check_bincheck(bin_number, ua)
+            if result_bincheck and result_bincheck.get('brand') != 'Unknown':
+                result = result_bincheck
+        
+        # If still no result, try handyapi
+        if not result or result.get('brand') == 'Unknown':
+            result_lookup = await BinChecker._check_handyapi(bin_number, ua)
+            if result_lookup and result_lookup.get('brand') != 'Unknown':
+                result = result_lookup
+        
+        # Default result if all APIs fail
+        if not result:
+            result = {
+                'brand': 'Unknown',
+                'type': 'Unknown',
+                'level': 'Unknown',
+                'issuer': 'Unknown',
+                'country': 'Unknown'
+            }
+        
+        # Cache the result
+        _bin_cache[bin_number] = {
+            'data': result,
+            'timestamp': time.time()
+        }
+        
+        return result
+
+    @staticmethod
+    async def _check_binlist(bin_number: str, ua: str) -> Optional[Dict[str, str]]:
+        """Check BIN using binlist.net API (free, no auth required)"""
+        try:
+            url = f'https://lookup.binlist.net/{bin_number}'
+            headers = {
+                'user-agent': ua,
+                'accept': 'application/json',
+                'accept-language': 'en-US,en;q=0.9'
+            }
+            
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=Config.BIN_CHECK_TIMEOUT, ssl=ssl_context) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        # Extract brand/scheme
+                        brand = data.get('scheme', 'Unknown')
+                        if brand:
+                            brand = brand.upper()
+                        
+                        # Extract type (debit/credit)
+                        card_type = data.get('type', 'Unknown')
+                        if card_type:
+                            card_type = card_type.upper()
+                        
+                        # Extract level/brand
+                        level = data.get('brand', 'Unknown')
+                        if level:
+                            level = level.upper()
+                        
+                        # Extract bank/issuer
+                        bank_data = data.get('bank', {})
+                        issuer = bank_data.get('name', 'Unknown') if bank_data else 'Unknown'
+                        
+                        # Extract country
+                        country_data = data.get('country', {})
+                        country = country_data.get('name', 'Unknown') if country_data else 'Unknown'
+                        
+                        return {
+                            'brand': brand or 'Unknown',
+                            'type': card_type or 'Unknown',
+                            'level': level or 'Unknown',
+                            'issuer': issuer or 'Unknown',
+                            'country': country or 'Unknown'
+                        }
+        except Exception as e:
+            logger.debug(f"binlist.net check failed for {bin_number}: {e}")
+        return None
+
+    @staticmethod
+    async def _check_bincheck(bin_number: str, ua: str) -> Optional[Dict[str, str]]:
+        """Check BIN using bincheck.io (scraping)"""
         try:
             url = f'https://bincheck.io/details/{bin_number}'
             headers = {
@@ -186,9 +282,9 @@ class BinChecker:
                     html = await response.text()
 
             # Parse BIN info
-            card_brand = BinChecker._extract_field(html, 'Card\\s*Brand')
-            card_type = BinChecker._extract_field(html, 'Card\\s*Type')
-            card_level = BinChecker._extract_field(html, 'Card\\s*Level')
+            card_brand = BinChecker._extract_field(html, r'Card\s*Brand')
+            card_type = BinChecker._extract_field(html, r'Card\s*Type')
+            card_level = BinChecker._extract_field(html, r'Card\s*Level')
 
             # Extract issuer
             issuer_match = re.search(r'<td[^>]*>\s*Issuer\s*Name\s*/\s*Bank\s*</td>\s*<td[^>]*>.*?<a[^>]*title="([^"]+)"', html, re.I)
@@ -203,30 +299,48 @@ class BinChecker:
             iso_country = re.sub(r'^Complete\s*', '', iso_country, flags=re.I)
             iso_country = re.sub(r'\s*database.*$', '', iso_country, flags=re.I)
 
-            result = {
+            return {
                 'brand': card_brand,
                 'type': card_type,
                 'level': card_level,
                 'issuer': issuer_name,
                 'country': iso_country
             }
-            
-            # Cache the result
-            _bin_cache[bin_number] = {
-                'data': result,
-                'timestamp': time.time()
-            }
-            
-            return result
         except Exception as e:
-            logger.error(f"BIN check error for {bin_number}: {e}")
-            return {
-                'brand': 'Unknown',
-                'type': 'Unknown',
-                'level': 'Unknown',
-                'issuer': 'Unknown',
-                'country': 'Unknown'
+            logger.debug(f"bincheck.io check failed for {bin_number}: {e}")
+        return None
+
+    @staticmethod
+    async def _check_handyapi(bin_number: str, ua: str) -> Optional[Dict[str, str]]:
+        """Check BIN using handyapi.com"""
+        try:
+            url = f'https://data.handyapi.com/bin/{bin_number}'
+            headers = {
+                'user-agent': ua,
+                'accept': 'application/json',
+                'accept-language': 'en-US,en;q=0.9'
             }
+            
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=Config.BIN_CHECK_TIMEOUT, ssl=ssl_context) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        if data.get('Status') == 'SUCCESS':
+                            return {
+                                'brand': data.get('Scheme', 'Unknown').upper() if data.get('Scheme') else 'Unknown',
+                                'type': data.get('Type', 'Unknown').upper() if data.get('Type') else 'Unknown',
+                                'level': data.get('CardTier', 'Unknown').upper() if data.get('CardTier') else 'Unknown',
+                                'issuer': data.get('Issuer', 'Unknown') or 'Unknown',
+                                'country': data.get('CountryName', 'Unknown') or 'Unknown'
+                            }
+        except Exception as e:
+            logger.debug(f"handyapi.com check failed for {bin_number}: {e}")
+        return None
 
     @staticmethod
     def _extract_field(html: str, field_name: str) -> str:
@@ -234,6 +348,7 @@ class BinChecker:
         pattern = f'<td[^>]*>\\s*{field_name}\\s*</td>\\s*<td[^>]*>\\s*(.*?)\\s*</td>'
         match = re.search(pattern, html, re.I)
         return match.group(1).strip() if match else 'Unknown'
+
 
 class AsyncCardChecker:
     """Async card checker with proper resource management"""
@@ -340,7 +455,6 @@ class AsyncCardChecker:
             product_page = await self._get_product_page()
             if not product_page:
                 error_msg = "Failed to load product page"
-                # Check if this is a bad site issue
                 check_and_handle_bad_site(self.site_url, error_msg)
                 return self._error_result(error_msg, check_bad_site=True)
 
@@ -419,14 +533,12 @@ class AsyncCardChecker:
 
     async def _get_with_retry(self, url: str, headers: Dict, **kwargs) -> Optional[str]:
         """Get URL with retry logic, rate limiting, and metrics"""
-        # Apply rate limiting
         parsed_url = urlparse(url)
         domain = parsed_url.netloc
 
         start_time = time.time()
         for attempt in range(Config.MAX_RETRIES):
             try:
-                # Acquire rate limiting tokens
                 await global_rate_limiter.acquire()
                 await domain_rate_limiter.acquire(domain)
 
@@ -442,19 +554,17 @@ class AsyncCardChecker:
                     metrics_collector.record_request(domain, False, response_time)
                     logger.error(f"Failed to get {url} after {Config.MAX_RETRIES} attempts: {e}")
                     return None
-                await asyncio.sleep(Config.RETRY_DELAY * (2 ** attempt))  # Exponential backoff
+                await asyncio.sleep(Config.RETRY_DELAY * (2 ** attempt))
         return None
 
     async def _post_with_retry(self, url: str, headers: Dict, data: Any = None, **kwargs) -> Optional[str]:
         """Post URL with retry logic, rate limiting, and metrics"""
-        # Apply rate limiting
         parsed_url = urlparse(url)
         domain = parsed_url.netloc
 
         start_time = time.time()
         for attempt in range(Config.MAX_RETRIES):
             try:
-                # Acquire rate limiting tokens
                 await global_rate_limiter.acquire()
                 await domain_rate_limiter.acquire(domain)
 
@@ -470,7 +580,7 @@ class AsyncCardChecker:
                     metrics_collector.record_request(domain, False, response_time)
                     logger.error(f"Failed to post {url} after {Config.MAX_RETRIES} attempts: {e}")
                     return None
-                await asyncio.sleep(Config.RETRY_DELAY * (2 ** attempt))  # Exponential backoff
+                await asyncio.sleep(Config.RETRY_DELAY * (2 ** attempt))
         return None
 
     async def _get_product_page(self) -> Optional[str]:
@@ -483,7 +593,6 @@ class AsyncCardChecker:
         form_match = re.search(r'<form[^>]+class="variations_form cart"[^>]+data-product_id="([^"]+)"', html)
         if form_match:
             product_id = form_match.group(1)
-            # Try to get variation data
             var_match = re.search(r'data-product_variations="([^"]+)"', html)
             if var_match and var_match.group(1) != 'false':
                 try:
@@ -746,19 +855,17 @@ class AsyncCardChecker:
                     result['message'] = 'CVV CHARGED'
                     result['receipt'] = receipt_url
 
-                    # Calculate elapsed time
                     elapsed_time = time.time() - self.start_time
 
-                    # Format the response
                     response_text = f"""CVV ✅
 
 𝗖𝗖 ⇾ {self.cc_data}
 𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Ppcp-gateway
 𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ CVV CHARGED
 
-𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'UNKNOWN')} - {bin_info.get('type', 'UNKNOWN')} - {bin_info.get('level', 'UNKNOWN')}
-𝗕𝗮𝗻𝗸: {bin_info.get('issuer', 'UNKNOWN')}
-𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'UNKNOWN')} 🏳️
+𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'Unknown')} - {bin_info.get('type', 'Unknown')} - {bin_info.get('level', 'Unknown')}
+𝗕𝗮𝗻𝗸: {bin_info.get('issuer', 'Unknown')}
+𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'Unknown')} 🏳️
 
 𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀 [ 0 ]
 
@@ -786,7 +893,6 @@ class AsyncCardChecker:
                 result['status'] = status
                 result['message'] = message
                 
-                # Calculate elapsed time
                 elapsed_time = time.time() - self.start_time
 
                 if status == 'CCN':
@@ -796,9 +902,9 @@ class AsyncCardChecker:
 𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Ppcp-gateway
 𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ {message}
 
-𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'UNKNOWN')} - {bin_info.get('type', 'UNKNOWN')} - {bin_info.get('level', 'UNKNOWN')}
-𝗕𝗮𝗻𝗸: {bin_info.get('issuer', 'UNKNOWN')}
-𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'UNKNOWN')} 🏳️
+𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'Unknown')} - {bin_info.get('type', 'Unknown')} - {bin_info.get('level', 'Unknown')}
+𝗕𝗮𝗻𝗸: {bin_info.get('issuer', 'Unknown')}
+𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'Unknown')} 🏳️
 
 𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀 [ 0 ]
 
@@ -813,9 +919,9 @@ class AsyncCardChecker:
 𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Ppcp-gateway
 𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ {message}
 
-𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'UNKNOWN')} - {bin_info.get('type', 'UNKNOWN')} - {bin_info.get('level', 'UNKNOWN')}
-𝗕𝗮𝗻𝗸: {bin_info.get('issuer', 'UNKNOWN')}
-𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'UNKNOWN')} 🏳️
+𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'Unknown')} - {bin_info.get('type', 'Unknown')} - {bin_info.get('level', 'Unknown')}
+𝗕𝗮𝗻𝗸: {bin_info.get('issuer', 'Unknown')}
+𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'Unknown')} 🏳️
 
 𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀 [ 0 ]
 
@@ -835,7 +941,6 @@ class AsyncCardChecker:
         except:
             pass
 
-        # Calculate elapsed time
         elapsed_time = time.time() - self.start_time
 
         response_text = f"""DECLINED ❌
@@ -844,9 +949,9 @@ class AsyncCardChecker:
 𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Ppcp-gateway
 𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ {result['message']}
 
-𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'UNKNOWN')} - {bin_info.get('type', 'UNKNOWN')} - {bin_info.get('level', 'UNKNOWN')}
-𝗕𝗮𝗻𝗸: {bin_info.get('issuer', 'UNKNOWN')}
-𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'UNKNOWN')} 🏳️
+𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'Unknown')} - {bin_info.get('type', 'Unknown')} - {bin_info.get('level', 'Unknown')}
+𝗕𝗮𝗻𝗸: {bin_info.get('issuer', 'Unknown')}
+𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'Unknown')} 🏳️
 
 𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀 [ 0 ]
 
@@ -859,7 +964,6 @@ class AsyncCardChecker:
         """Create error result with bad site detection"""
         elapsed_time = time.time() - self.start_time
         
-        # Format error response text
         response_text = f"""ERROR ❌
 
 𝗖𝗖 ⇾ {self.cc_data}
@@ -881,23 +985,24 @@ class AsyncCardChecker:
             'bad_site_detected': check_bad_site
         }
 
+
 async def create_session() -> aiohttp.ClientSession:
     """Create a shared session with optimized connection pooling for production"""
     connector = aiohttp.TCPConnector(
         limit=Config.CONNECTION_LIMIT,
         limit_per_host=Config.CONNECTION_LIMIT_PER_HOST,
-        ttl_dns_cache=600,  # Cache DNS for 10 minutes
+        ttl_dns_cache=600,
         use_dns_cache=True,
-        ssl=False,  # Disable SSL verification for flexibility
-        keepalive_timeout=30,  # Keep connections alive
-        enable_cleanup_closed=True,  # Clean up closed connections
-        force_close=False  # Reuse connections
+        ssl=False,
+        keepalive_timeout=30,
+        enable_cleanup_closed=True,
+        force_close=False
     )
     
     timeout = aiohttp.ClientTimeout(
         total=Config.TIMEOUT,
-        connect=5,  # Fast connection timeout
-        sock_read=10  # Socket read timeout
+        connect=5,
+        sock_read=10
     )
     
     return aiohttp.ClientSession(
@@ -906,8 +1011,32 @@ async def create_session() -> aiohttp.ClientSession:
         trust_env=True
     )
 
+
+def _is_empty_response(result: Dict[str, Any]) -> bool:
+    """Check if the result has an empty or missing response message"""
+    if not result:
+        return True
+    
+    message = result.get('message', '')
+    response_text = result.get('response_text', '')
+    
+    # Check for empty message
+    if not message or message.strip() == '' or message == 'Unknown error':
+        return True
+    
+    # Check if response text has empty Response field
+    if '𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ \n' in response_text or '𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾  \n' in response_text:
+        return True
+    
+    # Check for "No payment response" which indicates site issue
+    if message == 'No payment response':
+        return True
+    
+    return False
+
+
 async def check_single_card(card_details: str, site_urls: List[str], proxy: Optional[str] = None) -> str:
-    """Check a single card asynchronously with bad site handling"""
+    """Check a single card asynchronously with bad site handling and empty response retry"""
     global _session
     if _session is None:
         _session = await create_session()
@@ -922,12 +1051,65 @@ async def check_single_card(card_details: str, site_urls: List[str], proxy: Opti
     if not available_sites:
         return "❌ No sites available! All sites may be marked as bad."
     
-    site_url = random.choice(available_sites)
+    # Make a copy of available sites to track which ones we've tried
+    sites_to_try = available_sites.copy()
+    random.shuffle(sites_to_try)
     
-    checker = AsyncCardChecker(card_details, site_url, proxy, _session)
-    result = await checker.check()
+    max_retries = min(3, len(sites_to_try))  # Try up to 3 different sites
+    tried_sites = []
+    last_result = None
     
-    return result.get('response_text', f"ERROR: {result.get('message', 'Unknown error')}")
+    for attempt in range(max_retries):
+        if not sites_to_try:
+            break
+            
+        site_url = sites_to_try.pop(0)
+        tried_sites.append(site_url)
+        
+        logger.info(f"Checking card on site: {site_url} (attempt {attempt + 1}/{max_retries})")
+        
+        checker = AsyncCardChecker(card_details, site_url, proxy, _session)
+        result = await checker.check()
+        last_result = result
+        
+        # Check if response is empty or has no meaningful message
+        if _is_empty_response(result):
+            logger.warning(f"Empty response from site {site_url}, will retry with different site")
+            
+            # If this is the last attempt, mark the site as bad
+            if attempt == max_retries - 1:
+                # Mark all tried sites as potentially bad (empty response)
+                for bad_site in tried_sites:
+                    add_bad_site(bad_site, "Empty response - no payment result")
+                    logger.info(f"Marked site as bad due to empty response: {bad_site}")
+            
+            continue  # Try next site
+        
+        # Got a valid response, return it
+        return result.get('response_text', f"ERROR: {result.get('message', 'Unknown error')}")
+    
+    # All retries exhausted with empty responses
+    # Return a meaningful error message with BIN info
+    start_time = time.time()
+    bin_info = await BinChecker.check(card_details.split('|')[0][:6], UserAgentGenerator.get())
+    elapsed_time = time.time() - start_time + (last_result.get('elapsed_time', 0) if last_result else 0)
+    
+    error_response = f"""ERROR ❌
+
+𝗖𝗖 ⇾ {card_details}
+𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Ppcp-gateway
+𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ All sites returned empty response - sites marked as bad
+
+𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'Unknown')} - {bin_info.get('type', 'Unknown')} - {bin_info.get('level', 'Unknown')}
+𝗕𝗮𝗻𝗸: {bin_info.get('issuer', 'Unknown')}
+𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'Unknown')} 🏳️
+
+𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀 [ 0 ]
+
+𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB"""
+    
+    return error_response
+
 
 async def check_multiple_cards(card_list: List[str], site_list: List[str], max_concurrent: int = 10) -> List[str]:
     """Check multiple cards with controlled concurrency (returns all results at once)"""
@@ -982,7 +1164,10 @@ async def check_cards_streaming(
         for i, card in enumerate(card_list):
             result = "❌ No sites available! All sites may be marked as bad."
             if callback:
-                await callback(i, card, result) if asyncio.iscoroutinefunction(callback) else callback(i, card, result)
+                if asyncio.iscoroutinefunction(callback):
+                    await callback(i, card, result)
+                else:
+                    callback(i, card, result)
             yield (i, card, result)
         return
     
@@ -993,10 +1178,7 @@ async def check_cards_streaming(
         """Check a single card and put result in queue"""
         async with semaphore:
             try:
-                site_url = random.choice(available_sites)
-                checker = AsyncCardChecker(card, site_url, None, _session)
-                result_dict = await checker.check()
-                result = result_dict.get('response_text', f"ERROR: {result_dict.get('message', 'Unknown error')}")
+                result = await check_single_card(card, available_sites)
             except Exception as e:
                 result = f"ERROR: Exception checking card: {str(e)}"
             
@@ -1072,12 +1254,14 @@ async def check_cards_with_immediate_callback(
         'errors': error_count
     }
 
+
 async def cleanup():
     """Cleanup resources"""
     global _session
     if _session:
         await _session.close()
         _session = None
+
 
 # Main entry point for async usage
 async def main_async():
@@ -1095,7 +1279,6 @@ async def main_async():
         if os.path.exists(sites_file):
             with open(sites_file, 'r') as f:
                 sites = [line.strip() for line in f if line.strip()]
-            # Randomize sites list for better distribution
             random.shuffle(sites)
         
         # Try to load cc.txt from current directory
@@ -1126,26 +1309,26 @@ async def main_async():
     finally:
         await cleanup()
 
+
 # Sync wrapper for backward compatibility
 def check_ppcp_card(card_details: str, site_urls: List[str]) -> str:
     """Sync wrapper for single card checking"""
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # If already in async context, try to use nest_asyncio
             try:
                 import nest_asyncio
                 nest_asyncio.apply()
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
             except ImportError:
-                # If nest_asyncio is not available, create a new loop manually
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
         return loop.run_until_complete(check_single_card(card_details, site_urls))
     except Exception as e:
         logger.error(f"Error in sync wrapper: {e}")
         return f"ERROR: {str(e)}"
+
 
 if __name__ == "__main__":
     # Run async main
