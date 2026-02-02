@@ -37,6 +37,10 @@ FORWARD_CHANNEL_ID = -1003865829143  # Replace with your channel ID or username
 USER_DB_FILE = 'users_db.json'
 USER_DB_LOCK_FILE = 'users_db.json.lock'
 
+# Site freeze state file
+SITE_FREEZE_FILE = 'site_freeze_state.json'
+SITE_FREEZE_LOCK_FILE = 'site_freeze_state.json.lock'
+
 # Channel ID for forwarding approved cards
 CHANNEL_ID = None
 
@@ -73,6 +77,88 @@ def save_user_db(db):
     with lock:
         with open(USER_DB_FILE, 'w') as f:
             json.dump(db, f, indent=2)
+
+def load_site_freeze_state():
+    """Load site freeze state from file with file locking for thread safety"""
+    lock = SoftFileLock(SITE_FREEZE_LOCK_FILE, timeout=10)
+    with lock:
+        if os.path.exists(SITE_FREEZE_FILE):
+            try:
+                with open(SITE_FREEZE_FILE, 'r') as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
+
+def save_site_freeze_state(state):
+    """Save site freeze state to file with file locking for thread safety"""
+    lock = SoftFileLock(SITE_FREEZE_LOCK_FILE, timeout=10)
+    with lock:
+        with open(SITE_FREEZE_FILE, 'w') as f:
+            json.dump(state, f, indent=2)
+
+def is_site_frozen(site_folder):
+    """Check if a site is frozen"""
+    state = load_site_freeze_state()
+    return state.get(site_folder, {}).get('frozen', False)
+
+def set_site_frozen(site_folder, frozen):
+    """Set the frozen state of a site"""
+    state = load_site_freeze_state()
+    if site_folder not in state:
+        state[site_folder] = {}
+    state[site_folder]['frozen'] = frozen
+    state[site_folder]['updated_at'] = datetime.now().isoformat()
+    save_site_freeze_state(state)
+    return True
+
+def get_all_b3_sites():
+    """Get all B3 site folders (site_* directories)"""
+    sites = []
+    try:
+        for item in os.listdir('.'):
+            if os.path.isdir(item) and (item.startswith('site_') or item.startswith('site')):
+                # Check if folder contains required files
+                site_txt = os.path.join(item, 'site.txt')
+                if os.path.exists(site_txt):
+                    sites.append(item)
+    except Exception as e:
+        print(f"Error getting B3 sites: {str(e)}")
+    return sorted(sites)
+
+def get_site_files(site_folder):
+    """Get all editable files in a site folder"""
+    files = []
+    try:
+        for item in os.listdir(site_folder):
+            file_path = os.path.join(site_folder, item)
+            if os.path.isfile(file_path):
+                # Only include text-based files
+                if item.endswith('.txt') or item.endswith('.json') or item.endswith('.py'):
+                    files.append(item)
+    except Exception as e:
+        print(f"Error getting site files: {str(e)}")
+    return sorted(files)
+
+def read_site_file(site_folder, filename):
+    """Read content of a file in a site folder"""
+    try:
+        file_path = os.path.join(site_folder, filename)
+        with open(file_path, 'r') as f:
+            return f.read()
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
+
+def write_site_file(site_folder, filename, content):
+    """Write content to a file in a site folder"""
+    try:
+        file_path = os.path.join(site_folder, filename)
+        with open(file_path, 'w') as f:
+            f.write(content)
+        return True
+    except Exception as e:
+        print(f"Error writing file: {str(e)}")
+        return False
 
 def is_user_approved(user_id):
     """Check if user is approved and access hasn't expired"""
@@ -127,7 +213,7 @@ def approve_user(user_id, duration_type):
     return True
 
 def discover_site_folders():
-    """Discover available site folders in the current directory"""
+    """Discover available site folders in the current directory (excludes frozen sites)"""
     try:
         # Find all directories that start with 'site_' or 'site'
         site_folders = []
@@ -139,7 +225,9 @@ def discover_site_folders():
                 cookies_2 = os.path.join(item, 'cookies_2.txt')
                 
                 if os.path.exists(site_txt) and os.path.exists(cookies_1) and os.path.exists(cookies_2):
-                    site_folders.append(item)
+                    # Skip frozen sites
+                    if not is_site_frozen(item):
+                        site_folders.append(item)
         
         return site_folders
     except Exception as e:
@@ -1329,6 +1417,11 @@ async def admin_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ],
         [
             InlineKeyboardButton("🗑️ Remove User", callback_data='admin_remove'),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Settings", callback_data='admin_settings'),
+        ],
+        [
             InlineKeyboardButton("❌ Close", callback_data='admin_close'),
         ]
     ]
@@ -1437,6 +1530,58 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             parse_mode='Markdown'
         )
     
+    elif action == 'admin_settings':
+        # Show settings submenu
+        keyboard = [
+            [
+                InlineKeyboardButton("🌐 B3 Sites", callback_data='settings_b3_sites'),
+            ],
+            [
+                InlineKeyboardButton("🎛️ B3 Control", callback_data='settings_control_b3'),
+            ],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data='admin_back_main'),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "⚙️ **Settings**\\n\\n"
+            "Select a settings category:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'admin_back_main':
+        # Go back to main admin menu
+        keyboard = [
+            [
+                InlineKeyboardButton("👥 Approve User", callback_data='admin_approve'),
+                InlineKeyboardButton("📋 List Users", callback_data='admin_list_users'),
+            ],
+            [
+                InlineKeyboardButton("⏱️ Set Check Interval", callback_data='admin_set_interval'),
+                InlineKeyboardButton("📊 View Stats", callback_data='admin_stats'),
+            ],
+            [
+                InlineKeyboardButton("🗑️ Remove User", callback_data='admin_remove'),
+            ],
+            [
+                InlineKeyboardButton("⚙️ Settings", callback_data='admin_settings'),
+            ],
+            [
+                InlineKeyboardButton("❌ Close", callback_data='admin_close'),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🔧 **Admin Control Panel**\\n\\n"
+            "Select an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
     elif action == 'admin_close':
         await query.delete_message()
 
@@ -1467,6 +1612,434 @@ async def interval_callback_handler(update: Update, context: ContextTypes.DEFAUL
         )
     except ValueError:
         await query.edit_message_text("❌ Invalid interval value.")
+
+# Store pending file edits (admin_id -> {site, file, awaiting_content})
+pending_file_edits = {}
+pending_file_edits_lock = threading.Lock()
+
+async def settings_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle settings menu callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ This action is only available to admins.")
+        return
+    
+    action = query.data
+    
+    if action == 'settings_b3_sites':
+        # Show list of B3 sites
+        sites = get_all_b3_sites()
+        
+        if not sites:
+            await query.edit_message_text(
+                "🌐 **B3 Sites**\\n\\n"
+                "No B3 sites found (site_* folders).",
+                parse_mode='Markdown'
+            )
+            return
+        
+        keyboard = []
+        for site in sites:
+            keyboard.append([InlineKeyboardButton(f"📁 {site}", callback_data=f'b3site_{site}')])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🌐 **B3 Sites**\\n\\n"
+            f"Found {len(sites)} site(s). Select a site to manage:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'settings_control_b3':
+        # Show B3 control panel with freeze/unfreeze options
+        sites = get_all_b3_sites()
+        freeze_state = load_site_freeze_state()
+        
+        if not sites:
+            await query.edit_message_text(
+                "🎛️ **B3 Control**\\n\\n"
+                "No B3 sites found (site_* folders).",
+                parse_mode='Markdown'
+            )
+            return
+        
+        keyboard = []
+        for site in sites:
+            is_frozen = freeze_state.get(site, {}).get('frozen', False)
+            status_emoji = "🔴" if is_frozen else "🟢"
+            action_text = "Unfreeze" if is_frozen else "Freeze"
+            keyboard.append([
+                InlineKeyboardButton(f"{status_emoji} {site}", callback_data=f'b3info_{site}'),
+                InlineKeyboardButton(f"{'🔓' if is_frozen else '🔒'} {action_text}", callback_data=f'b3toggle_{site}')
+            ])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Count active/frozen sites
+        active_count = sum(1 for s in sites if not freeze_state.get(s, {}).get('frozen', False))
+        frozen_count = len(sites) - active_count
+        
+        await query.edit_message_text(
+            "🎛️ **B3 Control Panel**\\n\\n"
+            f"🟢 Active: {active_count} | 🔴 Frozen: {frozen_count}\\n\\n"
+            "Select a site to toggle freeze status:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+async def b3site_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle B3 site selection callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ This action is only available to admins.")
+        return
+    
+    action = query.data
+    
+    if action.startswith('b3site_'):
+        # Show files in selected site
+        site_folder = action.replace('b3site_', '')
+        files = get_site_files(site_folder)
+        
+        if not files:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='settings_b3_sites')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                f"📁 **{site_folder}**\\n\\n"
+                "No editable files found in this site folder.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        keyboard = []
+        for file in files:
+            keyboard.append([InlineKeyboardButton(f"📄 {file}", callback_data=f'b3file_{site_folder}|{file}')])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='settings_b3_sites')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"📁 **{site_folder}**\\n\\n"
+            f"Found {len(files)} file(s). Select a file to view/edit:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+async def b3file_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle B3 file selection callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ This action is only available to admins.")
+        return
+    
+    action = query.data
+    
+    if action.startswith('b3file_'):
+        # Show file content and edit options
+        parts = action.replace('b3file_', '').split('|')
+        if len(parts) != 2:
+            await query.edit_message_text("❌ Invalid file selection.")
+            return
+        
+        site_folder, filename = parts
+        content = read_site_file(site_folder, filename)
+        
+        # Truncate content if too long for Telegram message
+        max_content_length = 3000
+        truncated = False
+        if len(content) > max_content_length:
+            content = content[:max_content_length]
+            truncated = True
+        
+        keyboard = [
+            [InlineKeyboardButton("✏️ Edit File", callback_data=f'b3edit_{site_folder}|{filename}')],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f'b3site_{site_folder}')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        truncate_notice = "\\n\\n⚠️ *Content truncated (file too large)*" if truncated else ""
+        
+        await query.edit_message_text(
+            f"📄 **{site_folder}/{filename}**\\n\\n"
+            f"```\\n{content}\\n```{truncate_notice}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+async def b3edit_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle B3 file edit callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ This action is only available to admins.")
+        return
+    
+    action = query.data
+    
+    if action.startswith('b3edit_'):
+        # Prepare for file edit
+        parts = action.replace('b3edit_', '').split('|')
+        if len(parts) != 2:
+            await query.edit_message_text("❌ Invalid file selection.")
+            return
+        
+        site_folder, filename = parts
+        
+        # Store pending edit (thread-safe)
+        with pending_file_edits_lock:
+            pending_file_edits[user_id] = {
+                'site': site_folder,
+                'file': filename,
+                'awaiting_content': True
+            }
+        
+        keyboard = [
+            [InlineKeyboardButton("❌ Cancel", callback_data=f'b3cancel_{site_folder}|{filename}')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"✏️ **Editing: {site_folder}/{filename}**\\n\\n"
+            "Please send the new content for this file.\\n\\n"
+            "⚠️ The entire file content will be replaced with your message.",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+async def b3cancel_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle B3 file edit cancel callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ This action is only available to admins.")
+        return
+    
+    action = query.data
+    
+    if action.startswith('b3cancel_'):
+        # Cancel pending edit
+        parts = action.replace('b3cancel_', '').split('|')
+        if len(parts) != 2:
+            await query.edit_message_text("❌ Invalid action.")
+            return
+        
+        site_folder, filename = parts
+        
+        # Remove pending edit (thread-safe)
+        with pending_file_edits_lock:
+            if user_id in pending_file_edits:
+                del pending_file_edits[user_id]
+        
+        # Go back to file view
+        content = read_site_file(site_folder, filename)
+        
+        # Truncate content if too long
+        max_content_length = 3000
+        truncated = False
+        if len(content) > max_content_length:
+            content = content[:max_content_length]
+            truncated = True
+        
+        keyboard = [
+            [InlineKeyboardButton("✏️ Edit File", callback_data=f'b3edit_{site_folder}|{filename}')],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f'b3site_{site_folder}')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        truncate_notice = "\\n\\n⚠️ *Content truncated (file too large)*" if truncated else ""
+        
+        await query.edit_message_text(
+            f"📄 **{site_folder}/{filename}**\\n\\n"
+            f"```\\n{content}\\n```{truncate_notice}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+async def b3toggle_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle B3 site freeze/unfreeze toggle callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ This action is only available to admins.")
+        return
+    
+    action = query.data
+    
+    if action.startswith('b3toggle_'):
+        site_folder = action.replace('b3toggle_', '')
+        
+        # Toggle freeze state
+        current_frozen = is_site_frozen(site_folder)
+        new_frozen = not current_frozen
+        set_site_frozen(site_folder, new_frozen)
+        
+        # Refresh the control panel
+        sites = get_all_b3_sites()
+        freeze_state = load_site_freeze_state()
+        
+        keyboard = []
+        for site in sites:
+            is_frozen = freeze_state.get(site, {}).get('frozen', False)
+            status_emoji = "🔴" if is_frozen else "🟢"
+            action_text = "Unfreeze" if is_frozen else "Freeze"
+            keyboard.append([
+                InlineKeyboardButton(f"{status_emoji} {site}", callback_data=f'b3info_{site}'),
+                InlineKeyboardButton(f"{'🔓' if is_frozen else '🔒'} {action_text}", callback_data=f'b3toggle_{site}')
+            ])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Count active/frozen sites
+        active_count = sum(1 for s in sites if not freeze_state.get(s, {}).get('frozen', False))
+        frozen_count = len(sites) - active_count
+        
+        status_text = "🔴 FROZEN" if new_frozen else "🟢 ACTIVE"
+        
+        await query.edit_message_text(
+            "🎛️ **B3 Control Panel**\\n\\n"
+            f"✅ {site_folder} is now {status_text}\\n\\n"
+            f"🟢 Active: {active_count} | 🔴 Frozen: {frozen_count}\\n\\n"
+            "Select a site to toggle freeze status:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+async def b3info_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle B3 site info callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ This action is only available to admins.")
+        return
+    
+    action = query.data
+    
+    if action.startswith('b3info_'):
+        site_folder = action.replace('b3info_', '')
+        
+        # Get site info
+        freeze_state = load_site_freeze_state()
+        site_state = freeze_state.get(site_folder, {})
+        is_frozen = site_state.get('frozen', False)
+        updated_at = site_state.get('updated_at', 'Never')
+        
+        # Get site URL
+        site_url = "Unknown"
+        try:
+            site_txt = os.path.join(site_folder, 'site.txt')
+            if os.path.exists(site_txt):
+                with open(site_txt, 'r') as f:
+                    site_url = f.read().strip()
+        except:
+            pass
+        
+        # Get files in site
+        files = get_site_files(site_folder)
+        
+        status_emoji = "🔴 FROZEN" if is_frozen else "🟢 ACTIVE"
+        
+        keyboard = [
+            [InlineKeyboardButton(f"{'🔓 Unfreeze' if is_frozen else '🔒 Freeze'}", callback_data=f'b3toggle_{site_folder}')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='settings_control_b3')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"📊 **Site Info: {site_folder}**\\n\\n"
+            f"🔗 URL: {site_url}\\n"
+            f"📁 Files: {len(files)}\\n"
+            f"📌 Status: {status_emoji}\\n"
+            f"🕐 Last Updated: {updated_at}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming messages for file editing"""
+    user_id = update.effective_user.id
+    
+    # Check if user is admin
+    if user_id != ADMIN_ID:
+        return
+    
+    # Check if there's a pending file edit (thread-safe)
+    with pending_file_edits_lock:
+        if user_id not in pending_file_edits:
+            return
+        
+        pending_edit = pending_file_edits[user_id]
+        if not pending_edit.get('awaiting_content'):
+            return
+        
+        site_folder = pending_edit['site']
+        filename = pending_edit['file']
+        
+        # Remove pending edit
+        del pending_file_edits[user_id]
+    
+    # Get the new content from the message
+    new_content = update.message.text
+    
+    if not new_content:
+        await update.message.reply_text("❌ No content received. Edit cancelled.")
+        return
+    
+    # Write the new content to the file
+    success = write_site_file(site_folder, filename, new_content)
+    
+    if success:
+        await update.message.reply_text(
+            f"✅ **File Updated Successfully**\\n\\n"
+            f"📁 Site: {site_folder}\\n"
+            f"📄 File: {filename}\\n"
+            f"📝 Size: {len(new_content)} characters",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ **Failed to Update File**\\n\\n"
+            f"📁 Site: {site_folder}\\n"
+            f"📄 File: {filename}\\n\\n"
+            "Please try again.",
+            parse_mode='Markdown'
+        )
 
 async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /remove command (admin only)"""
@@ -1671,6 +2244,16 @@ def main():
     application.add_handler(CallbackQueryHandler(duration_callback, pattern=r'^duration_'))
     application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern=r'^admin_'))
     application.add_handler(CallbackQueryHandler(interval_callback_handler, pattern=r'^interval_'))
+    application.add_handler(CallbackQueryHandler(settings_callback_handler, pattern=r'^settings_'))
+    application.add_handler(CallbackQueryHandler(b3site_callback_handler, pattern=r'^b3site_'))
+    application.add_handler(CallbackQueryHandler(b3file_callback_handler, pattern=r'^b3file_'))
+    application.add_handler(CallbackQueryHandler(b3edit_callback_handler, pattern=r'^b3edit_'))
+    application.add_handler(CallbackQueryHandler(b3cancel_callback_handler, pattern=r'^b3cancel_'))
+    application.add_handler(CallbackQueryHandler(b3toggle_callback_handler, pattern=r'^b3toggle_'))
+    application.add_handler(CallbackQueryHandler(b3info_callback_handler, pattern=r'^b3info_'))
+    
+    # Add message handler for file editing (must be before catch-all)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, file_edit_message_handler))
     
     # Add catch-all callback handler for debugging (must be last)
     application.add_handler(CallbackQueryHandler(unknown_callback_handler))
