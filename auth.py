@@ -1637,8 +1637,8 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         
         if not sites:
             await query.edit_message_text(
-                "🌐 **B3 Sites**\\n\\n"
-                "No B3 sites found (site_* folders).",
+                "🌐 *B3 Sites*\n\n"
+                "No B3 sites found (site\\_ folders).",
                 parse_mode='Markdown'
             )
             return
@@ -1651,7 +1651,7 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            "🌐 **B3 Sites**\\n\\n"
+            "🌐 *B3 Sites*\n\n"
             f"Found {len(sites)} site(s). Select a site to manage:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -1664,8 +1664,8 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         
         if not sites:
             await query.edit_message_text(
-                "🎛️ **B3 Control**\\n\\n"
-                "No B3 sites found (site_* folders).",
+                "🎛️ *B3 Control*\n\n"
+                "No B3 sites found (site\\_ folders).",
                 parse_mode='Markdown'
             )
             return
@@ -1688,8 +1688,8 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         frozen_count = len(sites) - active_count
         
         await query.edit_message_text(
-            "🎛️ **B3 Control Panel**\\n\\n"
-            f"🟢 Active: {active_count} | 🔴 Frozen: {frozen_count}\\n\\n"
+            "🎛️ *B3 Control Panel*\n\n"
+            f"🟢 Active: {active_count} | 🔴 Frozen: {frozen_count}\n\n"
             "Select a site to toggle freeze status:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -1719,7 +1719,7 @@ async def b3site_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await query.edit_message_text(
-                f"📁 **{site_folder}**\\n\\n"
+                f"📁 *{site_folder}*\n\n"
                 "No editable files found in this site folder.",
                 reply_markup=reply_markup,
                 parse_mode='Markdown'
@@ -1734,7 +1734,7 @@ async def b3site_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            f"📁 **{site_folder}**\\n\\n"
+            f"📁 *{site_folder}*\n\n"
             f"Found {len(files)} file(s). Select a file to view/edit:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -1777,11 +1777,14 @@ async def b3file_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        truncate_notice = "\\n\\n⚠️ *Content truncated (file too large)*" if truncated else ""
+        truncate_notice = "\n\n⚠️ _Content truncated (file too large)_" if truncated else ""
+        
+        # Escape special Markdown characters in content to prevent parsing errors
+        escaped_content = content.replace('`', "'").replace('*', '\\*').replace('_', '\\_').replace('[', '\\[')
         
         await query.edit_message_text(
-            f"📄 **{site_folder}/{filename}**\\n\\n"
-            f"```\\n{content}\\n```{truncate_notice}",
+            f"📄 *{site_folder}/{filename}*\n\n"
+            f"```\n{escaped_content}\n```{truncate_notice}",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -1823,8 +1826,8 @@ async def b3edit_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            f"✏️ **Editing: {site_folder}/{filename}**\\n\\n"
-            "Please send the new content for this file.\\n\\n"
+            f"✏️ *Editing: {site_folder}/{filename}*\n\n"
+            "Please send the new content for this file.\n\n"
             "⚠️ The entire file content will be replaced with your message.",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -1874,11 +1877,14 @@ async def b3cancel_callback_handler(update: Update, context: ContextTypes.DEFAUL
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        truncate_notice = "\\n\\n⚠️ *Content truncated (file too large)*" if truncated else ""
+        truncate_notice = "\n\n⚠️ _Content truncated (file too large)_" if truncated else ""
+        
+        # Escape special Markdown characters in content to prevent parsing errors
+        escaped_content = content.replace('`', "'").replace('*', '\\*').replace('_', '\\_').replace('[', '\\[')
         
         await query.edit_message_text(
-            f"📄 **{site_folder}/{filename}**\\n\\n"
-            f"```\\n{content}\\n```{truncate_notice}",
+            f"📄 *{site_folder}/{filename}*\n\n"
+            f"```\n{escaped_content}\n```{truncate_notice}",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -1929,9 +1935,9 @@ async def b3toggle_callback_handler(update: Update, context: ContextTypes.DEFAUL
         status_text = "🔴 FROZEN" if new_frozen else "🟢 ACTIVE"
         
         await query.edit_message_text(
-            "🎛️ **B3 Control Panel**\\n\\n"
-            f"✅ {site_folder} is now {status_text}\\n\\n"
-            f"🟢 Active: {active_count} | 🔴 Frozen: {frozen_count}\\n\\n"
+            "🎛️ *B3 Control Panel*\n\n"
+            f"✅ {site_folder} is now {status_text}\n\n"
+            f"🟢 Active: {active_count} | 🔴 Frozen: {frozen_count}\n\n"
             "Select a site to toggle freeze status:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -1982,10 +1988,10 @@ async def b3info_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            f"📊 **Site Info: {site_folder}**\\n\\n"
-            f"🔗 URL: {site_url}\\n"
-            f"📁 Files: {len(files)}\\n"
-            f"📌 Status: {status_emoji}\\n"
+            f"📊 *Site Info: {site_folder}*\n\n"
+            f"🔗 URL: {site_url}\n"
+            f"📁 Files: {len(files)}\n"
+            f"📌 Status: {status_emoji}\n"
             f"🕐 Last Updated: {updated_at}",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -2026,17 +2032,17 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
     
     if success:
         await update.message.reply_text(
-            f"✅ **File Updated Successfully**\\n\\n"
-            f"📁 Site: {site_folder}\\n"
-            f"📄 File: {filename}\\n"
+            f"✅ *File Updated Successfully*\n\n"
+            f"📁 Site: {site_folder}\n"
+            f"📄 File: {filename}\n"
             f"📝 Size: {len(new_content)} characters",
             parse_mode='Markdown'
         )
     else:
         await update.message.reply_text(
-            f"❌ **Failed to Update File**\\n\\n"
-            f"📁 Site: {site_folder}\\n"
-            f"📄 File: {filename}\\n\\n"
+            f"❌ *Failed to Update File*\n\n"
+            f"📁 Site: {site_folder}\n"
+            f"📄 File: {filename}\n\n"
             "Please try again.",
             parse_mode='Markdown'
         )
@@ -2053,8 +2059,8 @@ async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Check if user ID is provided
     if not context.args:
         await update.message.reply_text(
-            "❌ Please provide a user ID.\\n\\n"
-            "Format: /remove <user_id>\\n"
+            "❌ Please provide a user ID.\n\n"
+            "Format: /remove <user_id>\n"
             "Example: /remove 7405189284"
         )
         return
