@@ -20,6 +20,9 @@ from functools import wraps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
+# Import ppcp module for /pp command
+sys.path.append(os.path.join(os.path.dirname(__file__), 'ppcp'))
+
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -783,11 +786,13 @@ Please contact @TUMAOB to get access.
 
 Commands:
 /start - Show this message
-/b3 <card> - Check a single card
-/b3s <cards> - Check multiple cards
+/b3 <card> - Check a single card (Braintree Auth)
+/b3s <cards> - Check multiple cards (Braintree Auth)
+/pp <card> - Check a single card (PPCP Gateway)
 
-Single Card Example:
+Single Card Examples:
 /b3 5156123456789876|11|29|384
+/pp 4315037547717888|10|28|852
 
 Mass Check Examples:
 /b3s 5401683112957490|10|2029|741
@@ -937,10 +942,10 @@ async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_text = update.message.text
     # Remove the /b3s command
     cards_text = message_text.replace('/b3s', '', 1).strip()
-    
+
     # Split by newlines to get individual cards
     card_lines = [line.strip() for line in cards_text.split('\n') if line.strip()]
-    
+
     if not card_lines:
         await update.message.reply_text(
             "❌ No valid cards found.\n\n"
@@ -968,7 +973,7 @@ async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     total_cards = len(normalized_cards)
-    
+
     # Send initial status message
     status_msg = await update.message.reply_text(
         f"⏳ Checking {total_cards} card(s)...\n"
@@ -986,11 +991,11 @@ async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 current_time = time.time()
                 last_check_time = user_rate_limit.get(user_id, 0)
                 time_since_last_check = current_time - last_check_time
-                
+
                 if time_since_last_check < RATE_LIMIT_SECONDS:
                     wait_time = RATE_LIMIT_SECONDS - time_since_last_check
                     await asyncio.sleep(wait_time)
-                
+
                 # Update last check time
                 user_rate_limit[user_id] = time.time()
 
@@ -1040,6 +1045,81 @@ async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.delete()
     except:
         pass
+
+
+async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /pp command for ppcp gateway checking with rate limiting"""
+    user_id = update.effective_user.id
+
+    # Check if user is admin
+    if user_id == ADMIN_ID:
+        pass  # Admin always has access
+    elif not is_user_approved(user_id):
+        await update.message.reply_text(
+            "❌ You don't have access to use this bot.\n"
+            f"Your User ID: `{user_id}`\n\n"
+            "Please contact @TUMAOB for approval.",
+            parse_mode='Markdown'
+        )
+        return
+
+    # Rate limiting check (thread-safe)
+    with user_rate_limit_lock:
+        current_time = time.time()
+        last_check_time = user_rate_limit.get(user_id, 0)
+        time_since_last_check = current_time - last_check_time
+
+        if time_since_last_check < RATE_LIMIT_SECONDS:
+            wait_time = RATE_LIMIT_SECONDS - time_since_last_check
+            await update.message.reply_text(
+                f"⏳ Please wait {wait_time:.1f} seconds before checking another card.\n"
+                "This prevents overloading the system."
+            )
+            return
+
+        # Update last check time
+        user_rate_limit[user_id] = current_time
+
+    # Check if card details are provided
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Please provide card details.\n\n"
+            "Format: /pp number|mm|yy|cvv\n"
+            "Examples: \n/pp 4315037547717888|10|28|852\n/pp 4315037547717888|10|2028|852"
+        )
+        return
+
+    card_details = ' '.join(context.args)
+
+    # Validate card format (should have 3 pipes for 4 parts)
+    if card_details.count('|') != 3:
+        await update.message.reply_text(
+            "❌ Invalid card format.\n\n"
+            "Format: /pp number|mm|yy|cvv\n"
+            "Examples: \n/pp 4315037547717888|10|28|852\n/pp 4315037547717888|10|2028|852"
+        )
+        return
+
+    # Send "Checking Please Wait" message
+    checking_msg = await update.message.reply_text("⏳ Checking Please Wait...")
+
+    try:
+        # Import ppcp module dynamically
+        import ppcpgatewaycvv
+
+        # Normalize the card format (handle 2-digit year)
+        normalized_card = ppcpgatewaycvv.normalize_card_format(card_details)
+
+        # Check the card using ppcp module
+        result = ppcpgatewaycvv.check_single_card(normalized_card)
+
+        # Edit the message with the result
+        await checking_msg.edit_text(result)
+
+    except Exception as e:
+        error_message = f"❌ Error checking card: {str(e)}"
+        await checking_msg.edit_text(error_message)
+        print(f"Error in /pp command: {str(e)}")
 
 async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /approve command (admin only)"""
@@ -1200,6 +1280,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("b3", b3_command))
     application.add_handler(CommandHandler("b3s", b3s_command))
+    application.add_handler(CommandHandler("pp", pp_command))
     application.add_handler(CommandHandler("approve", approve_command))
     
     # Add callback query handler for duration selection (must be before generic handlers)

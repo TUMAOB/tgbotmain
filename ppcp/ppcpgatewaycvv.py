@@ -126,7 +126,74 @@ class TelegramNotifier:
 
 class BinChecker:
     """Check BIN information"""
-    
+
+    @staticmethod
+    def country_code_to_emoji(country_name: str) -> str:
+        """Convert country name to emoji flag"""
+        country_emoji_map = {
+            'Philippines': '🇵🇭',
+            'United States': '🇺🇸',
+            'United Kingdom': '🇬🇧',
+            'Canada': '🇨🇦',
+            'Australia': '🇦🇺',
+            'Germany': '🇩🇪',
+            'France': '🇫🇷',
+            'India': '🇮🇳',
+            'Japan': '🇯🇵',
+            'China': '🇨🇳',
+            'Brazil': '🇧🇷',
+            'Russia': '🇷🇺',
+            'South Africa': '🇿🇦',
+            'Nigeria': '🇳🇬',
+            'Mexico': '🇲🇽',
+            'Italy': '🇮🇹',
+            'Spain': '🇪🇸',
+            'Netherlands': '🇳🇱',
+            'Sweden': '🇸🇪',
+            'Switzerland': '🇨🇭',
+            'South Korea': '🇰🇷',
+            'Singapore': '🇸🇬',
+            'New Zealand': '🇳🇿',
+            'Ireland': '🇮🇪',
+            'Belgium': '🇧🇪',
+            'Austria': '🇦🇹',
+            'Denmark': '🇩🇰',
+            'Norway': '🇳🇴',
+            'Finland': '🇫🇮',
+            'Poland': '🇵🇱',
+            'Czech Republic': '🇨🇿',
+            'Portugal': '🇵🇹',
+            'Greece': '🇬🇷',
+            'Hungary': '🇭🇺',
+            'Romania': '🇷🇴',
+            'Turkey': '🇹🇷',
+            'Israel': '🇮🇱',
+            'United Arab Emirates': '🇦🇪',
+            'Saudi Arabia': '🇸🇦',
+            'Egypt': '🇪🇬',
+            'Argentina': '🇦🇷',
+            'Chile': '🇨🇱',
+            'Colombia': '🇨🇴',
+            'Peru': '🇵🇪',
+            'Venezuela': '🇻🇪',
+            'Thailand': '🇹🇭',
+            'Malaysia': '🇲🇾',
+            'Indonesia': '🇮🇩',
+            'Vietnam': '🇻🇳',
+        }
+
+        # Try to match country name
+        country_name_clean = country_name.strip()
+        if country_name_clean in country_emoji_map:
+            return country_emoji_map[country_name_clean]
+
+        # Try partial matches
+        for country, emoji in country_emoji_map.items():
+            if country_name_clean.lower() in country.lower() or country.lower() in country_name_clean.lower():
+                return emoji
+
+        return '🏳️'
+
     @staticmethod
     def check(bin_number: str, ua: str) -> Dict[str, str]:
         """Get BIN information"""
@@ -139,31 +206,35 @@ class BinChecker:
             }
             response = requests.get(url, headers=headers, timeout=10, verify=False)
             html = response.text
-            
+
             # Parse BIN info
             card_brand = BinChecker._extract_field(html, 'Card\\s*Brand')
             card_type = BinChecker._extract_field(html, 'Card\\s*Type')
             card_level = BinChecker._extract_field(html, 'Card\\s*Level')
-            
+
             # Extract issuer
             issuer_match = re.search(r'<td[^>]*>\s*Issuer\s*Name\s*/\s*Bank\s*</td>\s*<td[^>]*>.*?<a[^>]*title="([^"]+)"', html, re.I)
             issuer_name = issuer_match.group(1).strip() if issuer_match else 'Unknown'
             issuer_name = re.sub(r'^Complete\s*', '', issuer_name, flags=re.I)
             issuer_name = re.sub(r'\s*database.*$', '', issuer_name, flags=re.I)
             issuer_name = re.sub(r'\s*-\s*[A-Z\s]+$', '', issuer_name, flags=re.I)
-            
+
             # Extract country
             country_match = re.search(r'<td[^>]*>\s*ISO\s*Country\s*Name\s*</td>\s*<td[^>]*>.*?<a[^>]*title="([^"]+)"', html, re.I)
             iso_country = country_match.group(1).strip() if country_match else 'Unknown'
             iso_country = re.sub(r'^Complete\s*', '', iso_country, flags=re.I)
             iso_country = re.sub(r'\s*database.*$', '', iso_country, flags=re.I)
-            
+
+            # Get emoji for country
+            emoji = BinChecker.country_code_to_emoji(iso_country)
+
             return {
                 'brand': card_brand,
                 'type': card_type,
                 'level': card_level,
                 'issuer': issuer_name,
-                'country': iso_country
+                'country': iso_country,
+                'emoji': emoji
             }
         except Exception as e:
             return {
@@ -171,7 +242,8 @@ class BinChecker:
                 'type': 'Unknown',
                 'level': 'Unknown',
                 'issuer': 'Unknown',
-                'country': 'Unknown'
+                'country': 'Unknown',
+                'emoji': '🏳️'
             }
     
     @staticmethod
@@ -798,6 +870,12 @@ class WorkerThread(threading.Thread):
 def load_file(filename: str) -> List[str]:
     """Load lines from file"""
     try:
+        # If the file doesn't exist in current directory, try in ppcp directory
+        if not os.path.exists(filename):
+            ppcp_path = os.path.join(os.path.dirname(__file__), filename)
+            if os.path.exists(ppcp_path):
+                filename = ppcp_path
+
         with open(filename, 'r') as f:
             lines = [line.strip() for line in f if line.strip()]
         return lines
@@ -854,15 +932,15 @@ def get_bot_count() -> int:
             user_input = input("How many bots? (default: 1): ").strip()
             if not user_input:
                 return 1
-            
+
             num_bots = int(user_input)
             if num_bots <= 0:
                 print("Error: Number of bots must be positive")
                 continue
-            
+
             if num_bots > 5:
                 print(f"⚠️  WARNING: Using {num_bots} bots may cause high load and potential issues!")
-            
+
             return num_bots
         except ValueError:
             print("Error: Please enter a valid number")
@@ -871,44 +949,113 @@ def get_bot_count() -> int:
             exit(0)
 
 
+def check_single_card(cc_data: str) -> str:
+    """Check a single card and return formatted response"""
+    import time
+
+    # Load sites
+    sites = load_file('sites.txt')
+    if not sites:
+        return "❌ Error: No sites found in sites.txt. Please ensure the file exists and contains valid site URLs."
+
+    # Select random site
+    site = random.choice(sites)
+
+    # Record start time
+    start_time = time.time()
+
+    # Check card
+    checker = CardChecker(cc_data, site)
+    result = checker.check()
+
+    # Calculate elapsed time
+    elapsed_time = time.time() - start_time
+
+    # Get bin info
+    bin_info = result['bin_info']
+
+    # Determine response message
+    if result['status'] == 'CVV':
+        reason = "CVV"
+    elif result['status'] == 'CCN':
+        reason = "CCN"
+    else:
+        reason = "DECLINED"
+
+    # Format response
+    response = f"""{reason} {'✅' if result['status'] in ['CVV', 'CCN'] else '❌'}
+
+𝗖𝗖 ⇾ {cc_data}
+𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Ppcp-gateway
+𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ {reason}
+
+𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'UNKNOWN')} - {bin_info.get('type', 'UNKNOWN')} - {bin_info.get('level', 'UNKNOWN')}
+𝗕𝗮𝗻𝗸: {bin_info.get('bank', 'UNKNOWN')}
+𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'UNKNOWN')} {bin_info.get('emoji', '🏳️')}
+
+𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀 [ 0 ]
+
+𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB
+"""
+
+    return response
+
+
+def normalize_card_format(card_input: str) -> str:
+    """Normalize card format to number|mm|yy|cvv"""
+    card_input = card_input.strip()
+
+    # Handle format with 2-digit year
+    if card_input.count('|') == 3:
+        parts = card_input.split('|')
+        if len(parts) == 4:
+            n, mm, yy, cvc = parts
+            # Normalize year to 4 digits
+            if len(yy) == 2:
+                yy = '20' + yy
+            return f"{n}|{mm}|{yy}|{cvc}"
+
+    return card_input
+
+
 def main():
     """Main function"""
     print("=" * 60)
     print("PayPal Credit Card Gateway Checker - Python Version")
     print("=" * 60)
-    
+
     # Get number of bots from user
     Config.NUM_BOTS = get_bot_count()
-    
+
     # Load sites and cards
     sites = load_file('sites.txt')
     cards = load_file('cc.txt')
-    
+
     if not sites:
         print("Error: No sites found in sites.txt")
         return
-    
+
     if not cards:
         print("Error: No cards found in cc.txt")
         return
-    
+
     # Remove duplicates
     original_count = len(cards)
     cards = remove_duplicates(cards)
     duplicates_removed = original_count - len(cards)
-    
+
     if duplicates_removed > 0:
         print(f"Removed {duplicates_removed} duplicate card(s)")
-    
+
     print(f"Loaded {len(sites)} sites and {len(cards)} cards")
     print(f"Starting {Config.NUM_BOTS} bots...\n")
-    
+
     total_cards = len(cards)
-    
+
     # Split cards among bots
     cards_per_bot = len(cards) // Config.NUM_BOTS
     threads = []
-    
+
     for i in range(Config.NUM_BOTS):
         start_idx = i * cards_per_bot
         if i == Config.NUM_BOTS - 1:
@@ -916,15 +1063,15 @@ def main():
             bot_cards = cards[start_idx:]
         else:
             bot_cards = cards[start_idx:start_idx + cards_per_bot]
-        
+
         thread = WorkerThread(i + 1, bot_cards, sites, total_cards, start_idx)
         threads.append(thread)
         thread.start()
-    
+
     # Wait for all threads to complete
     for thread in threads:
         thread.join()
-    
+
     print("\n" + "=" * 60)
     print("All bots finished!")
     print("=" * 60)
