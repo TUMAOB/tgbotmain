@@ -890,6 +890,8 @@ async def main_async():
         if os.path.exists(sites_file):
             with open(sites_file, 'r') as f:
                 sites = [line.strip() for line in f if line.strip()]
+            # Randomize sites list for better distribution
+            random.shuffle(sites)
         
         # Try to load cc.txt from current directory
         if os.path.exists('cc.txt'):

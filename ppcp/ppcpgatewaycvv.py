@@ -76,6 +76,9 @@ def check_single_card(card_details):
     if not sites:
         return "❌ No sites found!"
 
+    # Randomize sites list for better distribution
+    random.shuffle(sites)
+
     # Use the existing check_ppcp_card function
     return check_ppcp_card(card_details, sites)
 
@@ -1111,6 +1114,9 @@ def main():
     if not cards:
         print("Error: No cards found in cc.txt")
         return
+    
+    # Randomize sites list for better distribution
+    random.shuffle(sites)
     
     # Remove duplicates
     original_count = len(cards)
