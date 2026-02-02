@@ -3,3 +3,7 @@ beautifulsoup4
 user-agent
 python-telegram-bot
 filelock
+aiohttp
+asyncio
+aiocache
+python-json-logger
