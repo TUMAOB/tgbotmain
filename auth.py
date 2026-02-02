@@ -790,6 +790,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "User"
     
+    # Check if user is admin and show admin commands
+    is_admin = user_id == ADMIN_ID
+    
     welcome_message = f"""
 👋 Welcome to the Card Checker Bot, @{username}!
 
@@ -804,7 +807,17 @@ Commands:
 /b3 <card> - Check a single card (Braintree Auth)
 /b3s <cards> - Check multiple cards (Braintree Auth)
 /pp <card/cards> - Check single or multiple cards (PPCP Gateway)
-
+"""
+    
+    if is_admin:
+        welcome_message += """
+**Admin Commands:**
+/admin - Open admin control panel
+/approve <user_id> - Approve a user
+/remove <user_id> - Remove a user
+"""
+    
+    welcome_message += """
 Single Card Examples:
 /b3 5156123456789876|11|29|384
 /pp 4315037547717888|10|28|852
@@ -1260,6 +1273,201 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
+async def admin_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /admin command - show admin menu"""
+    user_id = update.effective_user.id
+    
+    # Check if user is admin
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ This command is only available to admins.")
+        return
+    
+    # Create inline keyboard for admin menu
+    keyboard = [
+        [
+            InlineKeyboardButton("👥 Approve User", callback_data='admin_approve'),
+            InlineKeyboardButton("📋 List Users", callback_data='admin_list_users'),
+        ],
+        [
+            InlineKeyboardButton("⏱️ Set Check Interval", callback_data='admin_set_interval'),
+            InlineKeyboardButton("📊 View Stats", callback_data='admin_stats'),
+        ],
+        [
+            InlineKeyboardButton("🗑️ Remove User", callback_data='admin_remove'),
+            InlineKeyboardButton("❌ Close", callback_data='admin_close'),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "🔧 **Admin Control Panel**\\n\\n"
+        "Select an option:",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle admin menu callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ This action is only available to admins.")
+        return
+    
+    action = query.data
+    
+    if action == 'admin_approve':
+        await query.edit_message_text(
+            "👥 **Approve User**\\n\\n"
+            "Use the command: `/approve <user_id>`\\n"
+            "Example: `/approve 7405189284`",
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'admin_list_users':
+        db = load_user_db()
+        if not db:
+            await query.edit_message_text("📋 **User List**\\n\\nNo users found.")
+            return
+        
+        user_list = "📋 **Approved Users**\\n\\n"
+        for user_id_str, user_data in db.items():
+            access_type = user_data.get('access_type', 'unknown')
+            expiry = user_data.get('expiry_date')
+            
+            if access_type == 'lifetime':
+                status = "♾️ Lifetime"
+            else:
+                expiry_date = datetime.fromisoformat(expiry)
+                if datetime.now() > expiry_date:
+                    status = "❌ Expired"
+                else:
+                    days_left = (expiry_date - datetime.now()).days
+                    status = f"✅ {days_left} days left"
+            
+            user_list += f"• User ID: `{user_id_str}` - {status}\\n"
+        
+        await query.edit_message_text(user_list, parse_mode='Markdown')
+    
+    elif action == 'admin_set_interval':
+        # Create keyboard for interval selection
+        keyboard = [
+            [
+                InlineKeyboardButton("0.5s", callback_data='interval_0.5'),
+                InlineKeyboardButton("1s", callback_data='interval_1'),
+            ],
+            [
+                InlineKeyboardButton("2s", callback_data='interval_2'),
+                InlineKeyboardButton("5s", callback_data='interval_5'),
+            ],
+            [
+                InlineKeyboardButton("10s", callback_data='interval_10'),
+                InlineKeyboardButton("❌ Cancel", callback_data='admin_close'),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"⏱️ **Set Check Interval**\\n\\n"
+            f"Current interval: {RATE_LIMIT_SECONDS}s\\n\\n"
+            "Select new interval:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'admin_stats':
+        db = load_user_db()
+        total_users = len(db)
+        active_users = sum(1 for u in db.values() if u.get('access_type') == 'lifetime' or 
+                          (u.get('expiry_date') and datetime.now() < datetime.fromisoformat(u.get('expiry_date'))))
+        expired_users = total_users - active_users
+        
+        stats_text = f"📊 **Bot Statistics**\\n\\n"
+        stats_text += f"👥 Total Users: {total_users}\\n"
+        stats_text += f"✅ Active Users: {active_users}\\n"
+        stats_text += f"❌ Expired Users: {expired_users}\\n"
+        stats_text += f"⏱️ Check Interval: {RATE_LIMIT_SECONDS}s\\n"
+        
+        await query.edit_message_text(stats_text, parse_mode='Markdown')
+    
+    elif action == 'admin_remove':
+        await query.edit_message_text(
+            "🗑️ **Remove User**\\n\\n"
+            "Use the command: `/remove <user_id>`\\n"
+            "Example: `/remove 7405189284`",
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'admin_close':
+        await query.delete_message()
+
+async def interval_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle interval selection callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ This action is only available to admins.")
+        return
+    
+    global RATE_LIMIT_SECONDS
+    
+    interval_str = query.data.replace('interval_', '')
+    try:
+        new_interval = float(interval_str)
+        RATE_LIMIT_SECONDS = new_interval
+        
+        await query.edit_message_text(
+            f"✅ **Check Interval Updated**\\n\\n"
+            f"New interval: {new_interval}s\\n\\n"
+            "This will apply to all future checks.",
+            parse_mode='Markdown'
+        )
+    except ValueError:
+        await query.edit_message_text("❌ Invalid interval value.")
+
+async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /remove command (admin only)"""
+    user_id = update.effective_user.id
+    
+    # Check if user is admin
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ This command is only available to admins.")
+        return
+    
+    # Check if user ID is provided
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Please provide a user ID.\\n\\n"
+            "Format: /remove <user_id>\\n"
+            "Example: /remove 7405189284"
+        )
+        return
+    
+    try:
+        target_user_id = str(int(context.args[0]))
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID. Please provide a numeric user ID.")
+        return
+    
+    db = load_user_db()
+    
+    if target_user_id not in db:
+        await update.message.reply_text(f"❌ User `{target_user_id}` not found in database.", parse_mode='Markdown')
+        return
+    
+    del db[target_user_id]
+    save_user_db(db)
+    
+    await update.message.reply_text(f"✅ User `{target_user_id}` has been removed.", parse_mode='Markdown')
+
 async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /approve command (admin only)"""
     user_id = update.effective_user.id
@@ -1421,9 +1629,13 @@ def main():
     application.add_handler(CommandHandler("b3s", b3s_command))
     application.add_handler(CommandHandler("pp", pp_command))
     application.add_handler(CommandHandler("approve", approve_command))
+    application.add_handler(CommandHandler("admin", admin_menu_command))
+    application.add_handler(CommandHandler("remove", remove_user_command))
     
-    # Add callback query handler for duration selection (must be before generic handlers)
+    # Add callback query handlers (must be before generic handlers)
     application.add_handler(CallbackQueryHandler(duration_callback, pattern=r'^duration_'))
+    application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern=r'^admin_'))
+    application.add_handler(CallbackQueryHandler(interval_callback_handler, pattern=r'^interval_'))
     
     # Add catch-all callback handler for debugging (must be last)
     application.add_handler(CallbackQueryHandler(unknown_callback_handler))
