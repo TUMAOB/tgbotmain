@@ -1111,7 +1111,7 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     normalized_cards = []
     for card_line in card_lines:
         # Import ppcp module dynamically
-        import ppcpgatewaycvv
+        from ppcp import ppcpgatewaycvv
         normalized = ppcpgatewaycvv.normalize_card_format(card_line)
         if normalized:
             normalized_cards.append(normalized)
