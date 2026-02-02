@@ -30,6 +30,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Admin user ID
 ADMIN_ID = 7405188060
 
+# Mods database file
+MODS_DB_FILE = 'mods_db.json'
+MODS_DB_LOCK_FILE = 'mods_db.json.lock'
+
+# Auto-scan settings file
+AUTO_SCAN_SETTINGS_FILE = 'auto_scan_settings.json'
+AUTO_SCAN_SETTINGS_LOCK_FILE = 'auto_scan_settings.json.lock'
+
 # Forward channel ID (set to None to disable forwarding, or use channel username like '@yourchannel' or channel ID like -1001234567890)
 FORWARD_CHANNEL_ID = -1003865829143  # Replace with your channel ID or username
 
@@ -96,6 +104,114 @@ def save_site_freeze_state(state):
     with lock:
         with open(SITE_FREEZE_FILE, 'w') as f:
             json.dump(state, f, indent=2)
+
+def load_mods_db():
+    """Load mods database from file with file locking for thread safety"""
+    lock = SoftFileLock(MODS_DB_LOCK_FILE, timeout=10)
+    with lock:
+        if os.path.exists(MODS_DB_FILE):
+            try:
+                with open(MODS_DB_FILE, 'r') as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
+
+def save_mods_db(db):
+    """Save mods database to file with file locking for thread safety"""
+    lock = SoftFileLock(MODS_DB_LOCK_FILE, timeout=10)
+    with lock:
+        with open(MODS_DB_FILE, 'w') as f:
+            json.dump(db, f, indent=2)
+
+def is_mod(user_id):
+    """Check if user is a mod"""
+    db = load_mods_db()
+    return str(user_id) in db
+
+def is_admin_or_mod(user_id):
+    """Check if user is admin or mod"""
+    return user_id == ADMIN_ID or is_mod(user_id)
+
+def add_mod(user_id, added_by):
+    """Add a user as mod"""
+    db = load_mods_db()
+    db[str(user_id)] = {
+        'user_id': user_id,
+        'added_by': added_by,
+        'added_date': datetime.now().isoformat()
+    }
+    save_mods_db(db)
+    return True
+
+def remove_mod(user_id):
+    """Remove a user from mods"""
+    db = load_mods_db()
+    if str(user_id) in db:
+        del db[str(user_id)]
+        save_mods_db(db)
+        return True
+    return False
+
+def get_all_mods():
+    """Get all mods"""
+    return load_mods_db()
+
+def load_auto_scan_settings():
+    """Load auto-scan settings from file"""
+    lock = SoftFileLock(AUTO_SCAN_SETTINGS_LOCK_FILE, timeout=10)
+    with lock:
+        if os.path.exists(AUTO_SCAN_SETTINGS_FILE):
+            try:
+                with open(AUTO_SCAN_SETTINGS_FILE, 'r') as f:
+                    return json.load(f)
+            except:
+                return {'enabled': False, 'interval_hours': 1}
+        return {'enabled': False, 'interval_hours': 1}
+
+def save_auto_scan_settings(settings):
+    """Save auto-scan settings to file"""
+    lock = SoftFileLock(AUTO_SCAN_SETTINGS_LOCK_FILE, timeout=10)
+    with lock:
+        with open(AUTO_SCAN_SETTINGS_FILE, 'w') as f:
+            json.dump(settings, f, indent=2)
+
+def load_ppcp_sites():
+    """Load PPCP sites from ppcp/sites.txt"""
+    sites = []
+    sites_file = 'ppcp/sites.txt'
+    if os.path.exists(sites_file):
+        with open(sites_file, 'r') as f:
+            sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+    return sites
+
+def save_ppcp_sites(sites):
+    """Save PPCP sites to ppcp/sites.txt"""
+    sites_file = 'ppcp/sites.txt'
+    os.makedirs('ppcp', exist_ok=True)
+    with open(sites_file, 'w') as f:
+        for site in sites:
+            if site.strip():
+                f.write(site.strip() + '\n')
+    return True
+
+def add_ppcp_site(site_url):
+    """Add a site to PPCP sites"""
+    sites = load_ppcp_sites()
+    if site_url not in sites:
+        sites.append(site_url)
+        save_ppcp_sites(sites)
+        return True
+    return False
+
+def remove_ppcp_site(site_url):
+    """Remove a site from PPCP sites"""
+    sites = load_ppcp_sites()
+    if site_url in sites:
+        sites.remove(site_url)
+        save_ppcp_sites(sites)
+        return True
+    return False
 
 def is_site_frozen(site_folder):
     """Check if a site is frozen"""
@@ -1400,10 +1516,12 @@ async def admin_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Handle /admin command - show admin menu"""
     user_id = update.effective_user.id
     
-    # Check if user is admin
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ This command is only available to admins.")
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await update.message.reply_text("❌ This command is only available to admins and mods.")
         return
+    
+    is_admin = user_id == ADMIN_ID
     
     # Create inline keyboard for admin menu
     keyboard = [
@@ -1421,15 +1539,23 @@ async def admin_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [
             InlineKeyboardButton("⚙️ Settings", callback_data='admin_settings'),
         ],
-        [
-            InlineKeyboardButton("❌ Close", callback_data='admin_close'),
-        ]
     ]
+    
+    # Only admin can manage mods
+    if is_admin:
+        keyboard.append([
+            InlineKeyboardButton("👮 Manage Mods", callback_data='admin_manage_mods'),
+        ])
+    
+    keyboard.append([
+        InlineKeyboardButton("❌ Close", callback_data='admin_close'),
+    ])
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    role_text = "Admin" if is_admin else "Mod"
     await update.message.reply_text(
-        "🔧 **Admin Control Panel**\\n\\n"
-        "Select an option:",
+        f"🔧 *{role_text} Control Panel*\n\nSelect an option:",
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
@@ -1441,17 +1567,18 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     
     user_id = query.from_user.id
     
-    # Check if user is admin
-    if user_id != ADMIN_ID:
-        await query.edit_message_text("❌ This action is only available to admins.")
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
         return
     
+    is_admin = user_id == ADMIN_ID
     action = query.data
     
     if action == 'admin_approve':
         await query.edit_message_text(
-            "👥 **Approve User**\\n\\n"
-            "Use the command: `/approve <user_id>`\\n"
+            "👥 *Approve User*\n\n"
+            "Use the command: `/approve <user_id>`\n"
             "Example: `/approve 7405189284`",
             parse_mode='Markdown'
         )
@@ -1459,10 +1586,10 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif action == 'admin_list_users':
         db = load_user_db()
         if not db:
-            await query.edit_message_text("📋 **User List**\\n\\nNo users found.")
+            await query.edit_message_text("📋 *User List*\n\nNo users found.", parse_mode='Markdown')
             return
         
-        user_list = "📋 **Approved Users**\\n\\n"
+        user_list = "📋 *Approved Users*\n\n"
         for user_id_str, user_data in db.items():
             access_type = user_data.get('access_type', 'unknown')
             expiry = user_data.get('expiry_date')
@@ -1477,7 +1604,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                     days_left = (expiry_date - datetime.now()).days
                     status = f"✅ {days_left} days left"
             
-            user_list += f"• User ID: `{user_id_str}` - {status}\\n"
+            user_list += f"• User ID: `{user_id_str}` - {status}\n"
         
         await query.edit_message_text(user_list, parse_mode='Markdown')
     
@@ -1500,8 +1627,8 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            f"⏱️ **Set Check Interval**\\n\\n"
-            f"Current interval: {RATE_LIMIT_SECONDS}s\\n\\n"
+            f"⏱️ *Set Check Interval*\n\n"
+            f"Current interval: {RATE_LIMIT_SECONDS}s\n\n"
             "Select new interval:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -1514,18 +1641,23 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                           (u.get('expiry_date') and datetime.now() < datetime.fromisoformat(u.get('expiry_date'))))
         expired_users = total_users - active_users
         
-        stats_text = f"📊 **Bot Statistics**\\n\\n"
-        stats_text += f"👥 Total Users: {total_users}\\n"
-        stats_text += f"✅ Active Users: {active_users}\\n"
-        stats_text += f"❌ Expired Users: {expired_users}\\n"
-        stats_text += f"⏱️ Check Interval: {RATE_LIMIT_SECONDS}s\\n"
+        # Get mods count
+        mods_db = load_mods_db()
+        mods_count = len(mods_db)
+        
+        stats_text = f"📊 *Bot Statistics*\n\n"
+        stats_text += f"👥 Total Users: {total_users}\n"
+        stats_text += f"✅ Active Users: {active_users}\n"
+        stats_text += f"❌ Expired Users: {expired_users}\n"
+        stats_text += f"👮 Mods: {mods_count}\n"
+        stats_text += f"⏱️ Check Interval: {RATE_LIMIT_SECONDS}s"
         
         await query.edit_message_text(stats_text, parse_mode='Markdown')
     
     elif action == 'admin_remove':
         await query.edit_message_text(
-            "🗑️ **Remove User**\\n\\n"
-            "Use the command: `/remove <user_id>`\\n"
+            "🗑️ *Remove User*\n\n"
+            "Use the command: `/remove <user_id>`\n"
             "Example: `/remove 7405189284`",
             parse_mode='Markdown'
         )
@@ -1537,7 +1669,16 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 InlineKeyboardButton("🌐 B3 Sites", callback_data='settings_b3_sites'),
             ],
             [
+                InlineKeyboardButton("🧪 B3 Sites Test", callback_data='settings_b3_test'),
+            ],
+            [
                 InlineKeyboardButton("🎛️ B3 Control", callback_data='settings_control_b3'),
+            ],
+            [
+                InlineKeyboardButton("🔗 PPCP Sites", callback_data='settings_ppcp_sites'),
+            ],
+            [
+                InlineKeyboardButton("⏰ Auto-Scan Settings", callback_data='settings_auto_scan'),
             ],
             [
                 InlineKeyboardButton("⬅️ Back", callback_data='admin_back_main'),
@@ -1546,8 +1687,32 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            "⚙️ **Settings**\\n\\n"
-            "Select a settings category:",
+            "⚙️ *Settings*\n\nSelect a settings category:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'admin_manage_mods':
+        # Only admin can manage mods
+        if not is_admin:
+            await query.edit_message_text("❌ Only the admin can manage mods.")
+            return
+        
+        mods_db = get_all_mods()
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Add Mod", callback_data='mods_add')],
+        ]
+        
+        if mods_db:
+            keyboard.append([InlineKeyboardButton("📋 List Mods", callback_data='mods_list')])
+            keyboard.append([InlineKeyboardButton("➖ Remove Mod", callback_data='mods_remove')])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_back_main')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"👮 *Manage Mods*\n\nCurrent mods: {len(mods_db)}\n\nSelect an option:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -1569,15 +1734,22 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             [
                 InlineKeyboardButton("⚙️ Settings", callback_data='admin_settings'),
             ],
-            [
-                InlineKeyboardButton("❌ Close", callback_data='admin_close'),
-            ]
         ]
+        
+        # Only admin can manage mods
+        if is_admin:
+            keyboard.append([
+                InlineKeyboardButton("👮 Manage Mods", callback_data='admin_manage_mods'),
+            ])
+        
+        keyboard.append([
+            InlineKeyboardButton("❌ Close", callback_data='admin_close'),
+        ])
         reply_markup = InlineKeyboardMarkup(keyboard)
         
+        role_text = "Admin" if is_admin else "Mod"
         await query.edit_message_text(
-            "🔧 **Admin Control Panel**\\n\\n"
-            "Select an option:",
+            f"🔧 *{role_text} Control Panel*\n\nSelect an option:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -1592,9 +1764,9 @@ async def interval_callback_handler(update: Update, context: ContextTypes.DEFAUL
     
     user_id = query.from_user.id
     
-    # Check if user is admin
-    if user_id != ADMIN_ID:
-        await query.edit_message_text("❌ This action is only available to admins.")
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
         return
     
     global RATE_LIMIT_SECONDS
@@ -1605,8 +1777,8 @@ async def interval_callback_handler(update: Update, context: ContextTypes.DEFAUL
         RATE_LIMIT_SECONDS = new_interval
         
         await query.edit_message_text(
-            f"✅ **Check Interval Updated**\\n\\n"
-            f"New interval: {new_interval}s\\n\\n"
+            f"✅ *Check Interval Updated*\n\n"
+            f"New interval: {new_interval}s\n\n"
             "This will apply to all future checks.",
             parse_mode='Markdown'
         )
@@ -1624,9 +1796,9 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
     
     user_id = query.from_user.id
     
-    # Check if user is admin
-    if user_id != ADMIN_ID:
-        await query.edit_message_text("❌ This action is only available to admins.")
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
         return
     
     action = query.data
@@ -1637,8 +1809,7 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         
         if not sites:
             await query.edit_message_text(
-                "🌐 *B3 Sites*\n\n"
-                "No B3 sites found (site\\_ folders).",
+                "🌐 *B3 Sites*\n\nNo B3 sites found (site\\_ folders).",
                 parse_mode='Markdown'
             )
             return
@@ -1651,8 +1822,45 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            "🌐 *B3 Sites*\n\n"
-            f"Found {len(sites)} site(s). Select a site to manage:",
+            f"🌐 *B3 Sites*\n\nFound {len(sites)} site(s). Select a site to manage:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'settings_b3_test':
+        # Show B3 sites test panel - includes frozen sites
+        sites = get_all_b3_sites()
+        freeze_state = load_site_freeze_state()
+        
+        if not sites:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "🧪 *B3 Sites Test*\n\nNo B3 sites found (site\\_ folders).",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        keyboard = []
+        for site in sites:
+            is_frozen = freeze_state.get(site, {}).get('frozen', False)
+            status_emoji = "🔴" if is_frozen else "🟢"
+            keyboard.append([
+                InlineKeyboardButton(f"{status_emoji} {site}", callback_data=f'b3testinfo_{site}'),
+                InlineKeyboardButton("🧪 Test", callback_data=f'b3test_{site}')
+            ])
+        
+        keyboard.append([InlineKeyboardButton("🔄 Test All", callback_data='b3test_all')])
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Count active/frozen sites
+        active_count = sum(1 for s in sites if not freeze_state.get(s, {}).get('frozen', False))
+        frozen_count = len(sites) - active_count
+        
+        await query.edit_message_text(
+            f"🧪 *B3 Sites Test*\n\n🟢 Active: {active_count} | 🔴 Frozen: {frozen_count}\n\nSelect a site to test or test all:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -1664,8 +1872,7 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         
         if not sites:
             await query.edit_message_text(
-                "🎛️ *B3 Control*\n\n"
-                "No B3 sites found (site\\_ folders).",
+                "🎛️ *B3 Control*\n\nNo B3 sites found (site\\_ folders).",
                 parse_mode='Markdown'
             )
             return
@@ -1688,9 +1895,58 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         frozen_count = len(sites) - active_count
         
         await query.edit_message_text(
-            "🎛️ *B3 Control Panel*\n\n"
-            f"🟢 Active: {active_count} | 🔴 Frozen: {frozen_count}\n\n"
-            "Select a site to toggle freeze status:",
+            f"🎛️ *B3 Control Panel*\n\n🟢 Active: {active_count} | 🔴 Frozen: {frozen_count}\n\nSelect a site to toggle freeze status:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'settings_ppcp_sites':
+        # Show PPCP sites management
+        sites = load_ppcp_sites()
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Add Site", callback_data='ppcp_add_site')],
+        ]
+        
+        if sites:
+            keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='ppcp_view_sites')])
+            keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='ppcp_remove_site')])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"🔗 *PPCP Sites*\n\nTotal sites: {len(sites)}\n\nSelect an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'settings_auto_scan':
+        # Show auto-scan settings
+        settings = load_auto_scan_settings()
+        enabled = settings.get('enabled', False)
+        interval = settings.get('interval_hours', 1)
+        
+        status_text = "🟢 Enabled" if enabled else "🔴 Disabled"
+        
+        keyboard = [
+            [InlineKeyboardButton(f"{'🔴 Disable' if enabled else '🟢 Enable'}", callback_data='autoscan_toggle')],
+            [
+                InlineKeyboardButton("1h", callback_data='autoscan_interval_1'),
+                InlineKeyboardButton("2h", callback_data='autoscan_interval_2'),
+                InlineKeyboardButton("6h", callback_data='autoscan_interval_6'),
+            ],
+            [
+                InlineKeyboardButton("12h", callback_data='autoscan_interval_12'),
+                InlineKeyboardButton("24h", callback_data='autoscan_interval_24'),
+            ],
+            [InlineKeyboardButton("🔄 Run Scan Now", callback_data='autoscan_run_now')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"⏰ *Auto-Scan Settings*\n\nStatus: {status_text}\nInterval: Every {interval} hour(s)\n\nAuto-scan tests all non-frozen B3 sites and freezes non-working ones.\n\nSelect interval or toggle:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -1702,9 +1958,9 @@ async def b3site_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     
     user_id = query.from_user.id
     
-    # Check if user is admin
-    if user_id != ADMIN_ID:
-        await query.edit_message_text("❌ This action is only available to admins.")
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
         return
     
     action = query.data
@@ -1747,9 +2003,9 @@ async def b3file_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     
     user_id = query.from_user.id
     
-    # Check if user is admin
-    if user_id != ADMIN_ID:
-        await query.edit_message_text("❌ This action is only available to admins.")
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
         return
     
     action = query.data
@@ -1796,9 +2052,9 @@ async def b3edit_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     
     user_id = query.from_user.id
     
-    # Check if user is admin
-    if user_id != ADMIN_ID:
-        await query.edit_message_text("❌ This action is only available to admins.")
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
         return
     
     action = query.data
@@ -1840,9 +2096,9 @@ async def b3cancel_callback_handler(update: Update, context: ContextTypes.DEFAUL
     
     user_id = query.from_user.id
     
-    # Check if user is admin
-    if user_id != ADMIN_ID:
-        await query.edit_message_text("❌ This action is only available to admins.")
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
         return
     
     action = query.data
@@ -1896,9 +2152,9 @@ async def b3toggle_callback_handler(update: Update, context: ContextTypes.DEFAUL
     
     user_id = query.from_user.id
     
-    # Check if user is admin
-    if user_id != ADMIN_ID:
-        await query.edit_message_text("❌ This action is only available to admins.")
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
         return
     
     action = query.data
@@ -1950,9 +2206,9 @@ async def b3info_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     
     user_id = query.from_user.id
     
-    # Check if user is admin
-    if user_id != ADMIN_ID:
-        await query.edit_message_text("❌ This action is only available to admins.")
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
         return
     
     action = query.data
@@ -1997,13 +2253,656 @@ async def b3info_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             parse_mode='Markdown'
         )
 
+
+def test_b3_site(site_folder):
+    """Test a B3 site by attempting to get authorization"""
+    try:
+        # Get domain URL
+        site_txt = os.path.join(site_folder, 'site.txt')
+        if not os.path.exists(site_txt):
+            return False, "site.txt not found"
+        
+        with open(site_txt, 'r') as f:
+            domain_url = f.read().strip()
+        
+        if not domain_url:
+            return False, "Empty domain URL"
+        
+        # Try to access the site
+        headers = {
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        }
+        
+        response = requests.get(
+            f'{domain_url}/my-account/add-payment-method/',
+            headers=headers,
+            timeout=15,
+            verify=False
+        )
+        
+        if response.status_code == 200:
+            # Check if page contains expected content
+            if 'woocommerce' in response.text.lower() or 'braintree' in response.text.lower():
+                return True, "Site is working"
+            else:
+                return False, "Site content not as expected"
+        elif response.status_code == 403:
+            return False, "Access forbidden (403)"
+        elif response.status_code == 404:
+            return False, "Page not found (404)"
+        else:
+            return False, f"HTTP {response.status_code}"
+    
+    except requests.exceptions.Timeout:
+        return False, "Connection timeout"
+    except requests.exceptions.ConnectionError:
+        return False, "Connection error"
+    except Exception as e:
+        return False, str(e)
+
+
+async def b3test_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle B3 site test callbacks"""
+    query = update.callback_query
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.answer("❌ This action is only available to admins and mods.")
+        return
+    
+    action = query.data
+    
+    if action == 'b3test_all':
+        await query.answer("Testing all sites...")
+        
+        # Test all sites
+        sites = get_all_b3_sites()
+        freeze_state = load_site_freeze_state()
+        
+        results = []
+        working_count = 0
+        failed_count = 0
+        
+        await query.edit_message_text("🔄 *Testing all B3 sites...*\n\nPlease wait...", parse_mode='Markdown')
+        
+        for site in sites:
+            is_working, reason = test_b3_site(site)
+            is_frozen = freeze_state.get(site, {}).get('frozen', False)
+            
+            if is_working:
+                working_count += 1
+                results.append(f"✅ {site}: Working")
+            else:
+                failed_count += 1
+                results.append(f"❌ {site}: {reason}")
+                # Auto-freeze non-working sites that are not already frozen
+                if not is_frozen:
+                    set_site_frozen(site, True)
+                    results[-1] += " (Auto-frozen)"
+        
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='settings_b3_test')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        result_text = "\n".join(results)
+        await query.edit_message_text(
+            f"🧪 *B3 Sites Test Results*\n\n"
+            f"✅ Working: {working_count}\n"
+            f"❌ Failed: {failed_count}\n\n"
+            f"{result_text}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('b3test_'):
+        site_folder = action.replace('b3test_', '')
+        await query.answer(f"Testing {site_folder}...")
+        
+        # Test single site
+        is_working, reason = test_b3_site(site_folder)
+        freeze_state = load_site_freeze_state()
+        is_frozen = freeze_state.get(site_folder, {}).get('frozen', False)
+        
+        if is_working:
+            status = "✅ Working"
+        else:
+            status = f"❌ Failed: {reason}"
+        
+        keyboard = [
+            [InlineKeyboardButton(f"{'🔓 Unfreeze' if is_frozen else '🔒 Freeze'}", callback_data=f'b3toggle_{site_folder}')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='settings_b3_test')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"🧪 *Test Result: {site_folder}*\n\n"
+            f"Status: {status}\n"
+            f"Frozen: {'Yes' if is_frozen else 'No'}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('b3testinfo_'):
+        site_folder = action.replace('b3testinfo_', '')
+        await query.answer()
+        
+        # Get site info
+        freeze_state = load_site_freeze_state()
+        site_state = freeze_state.get(site_folder, {})
+        is_frozen = site_state.get('frozen', False)
+        
+        # Get site URL
+        site_url = "Unknown"
+        try:
+            site_txt = os.path.join(site_folder, 'site.txt')
+            if os.path.exists(site_txt):
+                with open(site_txt, 'r') as f:
+                    site_url = f.read().strip()
+        except:
+            pass
+        
+        status_emoji = "🔴 FROZEN" if is_frozen else "🟢 ACTIVE"
+        
+        keyboard = [
+            [InlineKeyboardButton("🧪 Test Now", callback_data=f'b3test_{site_folder}')],
+            [InlineKeyboardButton(f"{'🔓 Unfreeze' if is_frozen else '🔒 Freeze'}", callback_data=f'b3toggle_{site_folder}')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='settings_b3_test')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"📊 *Site: {site_folder}*\n\n"
+            f"🔗 URL: {site_url}\n"
+            f"📌 Status: {status_emoji}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+
+# Store pending PPCP site additions
+pending_ppcp_actions = {}
+pending_ppcp_actions_lock = threading.Lock()
+
+
+async def ppcp_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle PPCP sites callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
+        return
+    
+    action = query.data
+    
+    if action == 'ppcp_add_site':
+        # Store pending action
+        with pending_ppcp_actions_lock:
+            pending_ppcp_actions[user_id] = {'action': 'add_site'}
+        
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='ppcp_cancel')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "➕ *Add PPCP Site*\n\n"
+            "Please send the site URL (e.g., https://example.com):",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'ppcp_view_sites':
+        sites = load_ppcp_sites()
+        
+        if not sites:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='settings_ppcp_sites')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "📋 *PPCP Sites*\n\nNo sites found.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        sites_list = "\n".join([f"• {site}" for site in sites])
+        
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='settings_ppcp_sites')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"📋 *PPCP Sites* ({len(sites)} total)\n\n{sites_list}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'ppcp_remove_site':
+        sites = load_ppcp_sites()
+        
+        if not sites:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='settings_ppcp_sites')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "➖ *Remove PPCP Site*\n\nNo sites to remove.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        keyboard = []
+        for i, site in enumerate(sites):
+            # Truncate long URLs for button display
+            display_name = site[:30] + "..." if len(site) > 30 else site
+            keyboard.append([InlineKeyboardButton(f"🗑️ {display_name}", callback_data=f'ppcp_del_{i}')])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='settings_ppcp_sites')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "➖ *Remove PPCP Site*\n\nSelect a site to remove:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('ppcp_del_'):
+        index = int(action.replace('ppcp_del_', ''))
+        sites = load_ppcp_sites()
+        
+        if 0 <= index < len(sites):
+            removed_site = sites[index]
+            remove_ppcp_site(removed_site)
+            
+            await query.edit_message_text(
+                f"✅ *Site Removed*\n\n{removed_site}",
+                parse_mode='Markdown'
+            )
+            
+            # Show updated list after a moment
+            await asyncio.sleep(1)
+            
+            # Redirect back to PPCP sites menu
+            sites = load_ppcp_sites()
+            keyboard = [
+                [InlineKeyboardButton("➕ Add Site", callback_data='ppcp_add_site')],
+            ]
+            if sites:
+                keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='ppcp_view_sites')])
+                keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='ppcp_remove_site')])
+            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                f"🔗 *PPCP Sites*\n\nTotal sites: {len(sites)}\n\nSelect an option:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text("❌ Invalid site index.")
+    
+    elif action == 'ppcp_cancel':
+        # Cancel pending action
+        with pending_ppcp_actions_lock:
+            if user_id in pending_ppcp_actions:
+                del pending_ppcp_actions[user_id]
+        
+        # Redirect back to PPCP sites menu
+        sites = load_ppcp_sites()
+        keyboard = [
+            [InlineKeyboardButton("➕ Add Site", callback_data='ppcp_add_site')],
+        ]
+        if sites:
+            keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='ppcp_view_sites')])
+            keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='ppcp_remove_site')])
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"🔗 *PPCP Sites*\n\nTotal sites: {len(sites)}\n\nSelect an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+
+async def autoscan_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle auto-scan settings callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
+        return
+    
+    action = query.data
+    
+    if action == 'autoscan_toggle':
+        settings = load_auto_scan_settings()
+        settings['enabled'] = not settings.get('enabled', False)
+        save_auto_scan_settings(settings)
+        
+        # Redirect back to auto-scan settings
+        enabled = settings.get('enabled', False)
+        interval = settings.get('interval_hours', 1)
+        status_text = "🟢 Enabled" if enabled else "🔴 Disabled"
+        
+        keyboard = [
+            [InlineKeyboardButton(f"{'🔴 Disable' if enabled else '🟢 Enable'}", callback_data='autoscan_toggle')],
+            [
+                InlineKeyboardButton("1h", callback_data='autoscan_interval_1'),
+                InlineKeyboardButton("2h", callback_data='autoscan_interval_2'),
+                InlineKeyboardButton("6h", callback_data='autoscan_interval_6'),
+            ],
+            [
+                InlineKeyboardButton("12h", callback_data='autoscan_interval_12'),
+                InlineKeyboardButton("24h", callback_data='autoscan_interval_24'),
+            ],
+            [InlineKeyboardButton("🔄 Run Scan Now", callback_data='autoscan_run_now')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"⏰ *Auto-Scan Settings*\n\nStatus: {status_text}\nInterval: Every {interval} hour(s)\n\nAuto-scan tests all non-frozen B3 sites and freezes non-working ones.\n\nSelect interval or toggle:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('autoscan_interval_'):
+        interval = int(action.replace('autoscan_interval_', ''))
+        settings = load_auto_scan_settings()
+        settings['interval_hours'] = interval
+        save_auto_scan_settings(settings)
+        
+        # Redirect back to auto-scan settings
+        enabled = settings.get('enabled', False)
+        status_text = "🟢 Enabled" if enabled else "🔴 Disabled"
+        
+        keyboard = [
+            [InlineKeyboardButton(f"{'🔴 Disable' if enabled else '🟢 Enable'}", callback_data='autoscan_toggle')],
+            [
+                InlineKeyboardButton("1h", callback_data='autoscan_interval_1'),
+                InlineKeyboardButton("2h", callback_data='autoscan_interval_2'),
+                InlineKeyboardButton("6h", callback_data='autoscan_interval_6'),
+            ],
+            [
+                InlineKeyboardButton("12h", callback_data='autoscan_interval_12'),
+                InlineKeyboardButton("24h", callback_data='autoscan_interval_24'),
+            ],
+            [InlineKeyboardButton("🔄 Run Scan Now", callback_data='autoscan_run_now')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"⏰ *Auto-Scan Settings*\n\n✅ Interval updated to {interval} hour(s)\n\nStatus: {status_text}\nInterval: Every {interval} hour(s)\n\nAuto-scan tests all non-frozen B3 sites and freezes non-working ones.\n\nSelect interval or toggle:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'autoscan_run_now':
+        await query.edit_message_text("🔄 *Running Auto-Scan...*\n\nPlease wait...", parse_mode='Markdown')
+        
+        # Run scan on non-frozen sites only
+        sites = get_all_b3_sites()
+        freeze_state = load_site_freeze_state()
+        
+        results = []
+        working_count = 0
+        failed_count = 0
+        frozen_count = 0
+        
+        for site in sites:
+            is_frozen = freeze_state.get(site, {}).get('frozen', False)
+            
+            if is_frozen:
+                frozen_count += 1
+                continue  # Skip frozen sites
+            
+            is_working, reason = test_b3_site(site)
+            
+            if is_working:
+                working_count += 1
+                results.append(f"✅ {site}: Working")
+            else:
+                failed_count += 1
+                results.append(f"❌ {site}: {reason}")
+                # Auto-freeze non-working sites
+                set_site_frozen(site, True)
+                results[-1] += " (Auto-frozen)"
+        
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='settings_auto_scan')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        result_text = "\n".join(results) if results else "No active sites to test."
+        await query.edit_message_text(
+            f"🔄 *Auto-Scan Results*\n\n"
+            f"✅ Working: {working_count}\n"
+            f"❌ Failed & Frozen: {failed_count}\n"
+            f"⏸️ Already Frozen: {frozen_count}\n\n"
+            f"{result_text}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+
+async def mods_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle mods management callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Only admin can manage mods
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ Only the admin can manage mods.")
+        return
+    
+    action = query.data
+    
+    if action == 'mods_add':
+        # Store pending action
+        with pending_ppcp_actions_lock:
+            pending_ppcp_actions[user_id] = {'action': 'add_mod'}
+        
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='mods_cancel')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "➕ *Add Mod*\n\n"
+            "Please send the user ID of the person you want to add as mod:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'mods_list':
+        mods_db = get_all_mods()
+        
+        if not mods_db:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='admin_manage_mods')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "📋 *Mods List*\n\nNo mods found.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        mods_list = ""
+        for mod_id, mod_data in mods_db.items():
+            added_date = mod_data.get('added_date', 'Unknown')
+            mods_list += f"• User ID: `{mod_id}`\n  Added: {added_date[:10]}\n"
+        
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='admin_manage_mods')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"📋 *Mods List* ({len(mods_db)} total)\n\n{mods_list}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'mods_remove':
+        mods_db = get_all_mods()
+        
+        if not mods_db:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='admin_manage_mods')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "➖ *Remove Mod*\n\nNo mods to remove.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        keyboard = []
+        for mod_id in mods_db.keys():
+            keyboard.append([InlineKeyboardButton(f"🗑️ {mod_id}", callback_data=f'mods_del_{mod_id}')])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_manage_mods')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "➖ *Remove Mod*\n\nSelect a mod to remove:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('mods_del_'):
+        mod_id = action.replace('mods_del_', '')
+        
+        if remove_mod(mod_id):
+            await query.edit_message_text(
+                f"✅ *Mod Removed*\n\nUser ID: `{mod_id}`",
+                parse_mode='Markdown'
+            )
+            
+            # Redirect back to mods menu after a moment
+            await asyncio.sleep(1)
+            
+            mods_db = get_all_mods()
+            keyboard = [
+                [InlineKeyboardButton("➕ Add Mod", callback_data='mods_add')],
+            ]
+            if mods_db:
+                keyboard.append([InlineKeyboardButton("📋 List Mods", callback_data='mods_list')])
+                keyboard.append([InlineKeyboardButton("➖ Remove Mod", callback_data='mods_remove')])
+            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_back_main')])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                f"👮 *Manage Mods*\n\nCurrent mods: {len(mods_db)}\n\nSelect an option:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text(f"❌ Failed to remove mod `{mod_id}`.", parse_mode='Markdown')
+    
+    elif action == 'mods_cancel':
+        # Cancel pending action
+        with pending_ppcp_actions_lock:
+            if user_id in pending_ppcp_actions:
+                del pending_ppcp_actions[user_id]
+        
+        # Redirect back to mods menu
+        mods_db = get_all_mods()
+        keyboard = [
+            [InlineKeyboardButton("➕ Add Mod", callback_data='mods_add')],
+        ]
+        if mods_db:
+            keyboard.append([InlineKeyboardButton("📋 List Mods", callback_data='mods_list')])
+            keyboard.append([InlineKeyboardButton("➖ Remove Mod", callback_data='mods_remove')])
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_back_main')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"👮 *Manage Mods*\n\nCurrent mods: {len(mods_db)}\n\nSelect an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
 async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages for file editing"""
+    """Handle incoming messages for file editing, PPCP site additions, and mod additions"""
     user_id = update.effective_user.id
     
-    # Check if user is admin
-    if user_id != ADMIN_ID:
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
         return
+    
+    message_text = update.message.text
+    if not message_text:
+        return
+    
+    # Check for pending PPCP/mod actions first
+    with pending_ppcp_actions_lock:
+        if user_id in pending_ppcp_actions:
+            pending_action = pending_ppcp_actions[user_id]
+            action_type = pending_action.get('action')
+            
+            if action_type == 'add_site':
+                # Adding PPCP site
+                del pending_ppcp_actions[user_id]
+                
+                site_url = message_text.strip()
+                
+                # Validate URL
+                if not site_url.startswith('http://') and not site_url.startswith('https://'):
+                    await update.message.reply_text(
+                        "❌ Invalid URL. Please provide a valid URL starting with http:// or https://",
+                        parse_mode='Markdown'
+                    )
+                    return
+                
+                if add_ppcp_site(site_url):
+                    await update.message.reply_text(
+                        f"✅ *Site Added Successfully*\n\n{site_url}",
+                        parse_mode='Markdown'
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"⚠️ Site already exists or failed to add:\n{site_url}",
+                        parse_mode='Markdown'
+                    )
+                return
+            
+            elif action_type == 'add_mod':
+                # Adding mod - only admin can do this
+                if user_id != ADMIN_ID:
+                    del pending_ppcp_actions[user_id]
+                    await update.message.reply_text("❌ Only the admin can add mods.")
+                    return
+                
+                del pending_ppcp_actions[user_id]
+                
+                try:
+                    mod_user_id = int(message_text.strip())
+                    
+                    if is_mod(mod_user_id):
+                        await update.message.reply_text(
+                            f"⚠️ User `{mod_user_id}` is already a mod.",
+                            parse_mode='Markdown'
+                        )
+                        return
+                    
+                    if mod_user_id == ADMIN_ID:
+                        await update.message.reply_text("❌ Cannot add admin as mod.")
+                        return
+                    
+                    add_mod(mod_user_id, user_id)
+                    await update.message.reply_text(
+                        f"✅ *Mod Added Successfully*\n\nUser ID: `{mod_user_id}`",
+                        parse_mode='Markdown'
+                    )
+                except ValueError:
+                    await update.message.reply_text(
+                        "❌ Invalid user ID. Please provide a numeric user ID.",
+                        parse_mode='Markdown'
+                    )
+                return
     
     # Check if there's a pending file edit (thread-safe)
     with pending_file_edits_lock:
@@ -2021,7 +2920,7 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
         del pending_file_edits[user_id]
     
     # Get the new content from the message
-    new_content = update.message.text
+    new_content = message_text
     
     if not new_content:
         await update.message.reply_text("❌ No content received. Edit cancelled.")
@@ -2051,9 +2950,9 @@ async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Handle /remove command (admin only)"""
     user_id = update.effective_user.id
     
-    # Check if user is admin
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ This command is only available to admins.")
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await update.message.reply_text("❌ This command is only available to admins and mods.")
         return
     
     # Check if user ID is provided
@@ -2083,14 +2982,14 @@ async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(f"✅ User `{target_user_id}` has been removed.", parse_mode='Markdown')
 
 async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /approve command (admin only)"""
+    """Handle /approve command (admin and mods)"""
     user_id = update.effective_user.id
     
     print(f"DEBUG: /approve command called by user {user_id}")
     
-    # Check if user is admin
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ This command is only available to admins.")
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await update.message.reply_text("❌ This command is only available to admins and mods.")
         return
     
     # Check if user ID is provided
@@ -2151,9 +3050,9 @@ async def duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         print(f"DEBUG: Callback received from user {user_id}, data: {query.data}")
         
-        # Check if user is admin
-        if user_id != ADMIN_ID:
-            await query.edit_message_text("❌ This action is only available to admins.")
+        # Check if user is admin or mod
+        if not is_admin_or_mod(user_id):
+            await query.edit_message_text("❌ This action is only available to admins and mods.")
             return
         
         # Check if there's a pending approval (thread-safe)
@@ -2257,6 +3156,10 @@ def main():
     application.add_handler(CallbackQueryHandler(b3cancel_callback_handler, pattern=r'^b3cancel_'))
     application.add_handler(CallbackQueryHandler(b3toggle_callback_handler, pattern=r'^b3toggle_'))
     application.add_handler(CallbackQueryHandler(b3info_callback_handler, pattern=r'^b3info_'))
+    application.add_handler(CallbackQueryHandler(b3test_callback_handler, pattern=r'^b3test'))
+    application.add_handler(CallbackQueryHandler(ppcp_callback_handler, pattern=r'^ppcp_'))
+    application.add_handler(CallbackQueryHandler(autoscan_callback_handler, pattern=r'^autoscan_'))
+    application.add_handler(CallbackQueryHandler(mods_callback_handler, pattern=r'^mods_'))
     
     # Add message handler for file editing (must be before catch-all)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, file_edit_message_handler))
