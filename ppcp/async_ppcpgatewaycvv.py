@@ -14,7 +14,6 @@ import logging
 from urllib.parse import urlparse, parse_qs, urlencode
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
-from aiocache import cached, Cache
 import ssl
 
 # Import rate limiter and metrics
@@ -34,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 # Global session and cache
 _session = None
-_cache = Cache(Cache.MEMORY, namespace="ppcp", ttl=3600)  # 1 hour cache
+_bin_cache = {}  # Simple dict cache for BIN info
 
 # Configuration
 class Config:
@@ -148,9 +147,17 @@ class BinChecker:
     """Check BIN information with caching"""
 
     @staticmethod
-    @cached(ttl=3600, cache=_cache)  # Cache for 1 hour
     async def check(bin_number: str, ua: str) -> Dict[str, str]:
         """Get BIN information with caching"""
+        global _bin_cache
+        
+        # Check cache first
+        if bin_number in _bin_cache:
+            cache_entry = _bin_cache[bin_number]
+            # Check if cache is still valid (1 hour TTL)
+            if time.time() - cache_entry['timestamp'] < 3600:
+                return cache_entry['data']
+        
         try:
             url = f'https://bincheck.io/details/{bin_number}'
             headers = {
@@ -185,13 +192,21 @@ class BinChecker:
             iso_country = re.sub(r'^Complete\s*', '', iso_country, flags=re.I)
             iso_country = re.sub(r'\s*database.*$', '', iso_country, flags=re.I)
 
-            return {
+            result = {
                 'brand': card_brand,
                 'type': card_type,
                 'level': card_level,
                 'issuer': issuer_name,
                 'country': iso_country
             }
+            
+            # Cache the result
+            _bin_cache[bin_number] = {
+                'data': result,
+                'timestamp': time.time()
+            }
+            
+            return result
         except Exception as e:
             logger.error(f"BIN check error for {bin_number}: {e}")
             return {
@@ -845,7 +860,7 @@ async def check_multiple_cards(card_list: List[str], site_list: List[str], max_c
     # Handle exceptions
     formatted_results = []
     for i, result in enumerate(results):
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             formatted_results.append(f"ERROR: Exception checking card {card_list[i]}: {str(result)}")
         else:
             formatted_results.append(result)
