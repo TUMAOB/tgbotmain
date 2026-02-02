@@ -1105,42 +1105,59 @@ async def check_single_card(card_details: str, site_urls: List[str], proxy: Opti
     sites_to_try = available_sites.copy()
     random.shuffle(sites_to_try)
     
-    max_retries = min(5, len(sites_to_try))  # Try up to 5 different sites for bad site issues
+    max_site_retries = min(5, len(sites_to_try))  # Try up to 5 different sites for bad site issues
+    empty_response_retries = 3  # Retry 3 times on same site for empty responses before marking as bad
     tried_sites = []
     last_result = None
     
-    for attempt in range(max_retries):
+    for site_attempt in range(max_site_retries):
         if not sites_to_try:
             break
             
         site_url = sites_to_try.pop(0)
         tried_sites.append(site_url)
         
-        logger.info(f"Checking card on site: {site_url} (attempt {attempt + 1}/{max_retries})")
+        logger.info(f"Checking card on site: {site_url} (site attempt {site_attempt + 1}/{max_site_retries})")
         
-        checker = AsyncCardChecker(card_details, site_url, proxy, _session)
-        result = await checker.check()
-        last_result = result
+        # Retry loop for empty responses on the same site
+        empty_retry_count = 0
+        site_has_empty_response = False
         
-        # Check if response indicates a bad site (out of stock, cannot find product ID, etc.)
-        # If bad site detected, the site is already moved to badsites.txt by the checker
-        # Don't send response, just retry with a different site
-        if _is_bad_site_response(result):
-            logger.warning(f"Bad site detected: {site_url} - {result.get('message', 'Unknown')}. Retrying with different site...")
-            continue  # Try next site without sending response
-        
-        # Check if response is empty or has no meaningful message
-        if _is_empty_response(result):
-            logger.warning(f"Empty response from site {site_url}, will retry with different site")
+        for empty_retry in range(empty_response_retries):
+            checker = AsyncCardChecker(card_details, site_url, proxy, _session)
+            result = await checker.check()
+            last_result = result
             
-            # Mark site as bad for empty response
-            add_bad_site(site_url, "Empty response - no payment result")
-            logger.info(f"Marked site as bad due to empty response: {site_url}")
+            # Check if response indicates a bad site (out of stock, cannot find product ID, etc.)
+            # If bad site detected, the site is already moved to badsites.txt by the checker
+            # Don't send response, just retry with a different site
+            if _is_bad_site_response(result):
+                logger.warning(f"Bad site detected: {site_url} - {result.get('message', 'Unknown')}. Retrying with different site...")
+                break  # Exit empty retry loop, try next site
             
+            # Check if response is empty or has no meaningful message
+            if _is_empty_response(result):
+                empty_retry_count += 1
+                logger.warning(f"Empty response from site {site_url}, retry {empty_retry_count}/{empty_response_retries}")
+                
+                if empty_retry_count < empty_response_retries:
+                    # Wait a bit before retrying on same site
+                    await asyncio.sleep(0.5)
+                    continue  # Retry on same site
+                else:
+                    # After 3 retries with empty response, mark site as bad
+                    site_has_empty_response = True
+                    logger.warning(f"Site {site_url} returned empty response {empty_response_retries} times, marking as bad")
+                    add_bad_site(site_url, f"Empty response after {empty_response_retries} retries - no payment result")
+                    logger.info(f"Marked site as bad due to repeated empty responses: {site_url}")
+                    break  # Exit empty retry loop, try next site
+            else:
+                # Got a valid response (not empty, not bad site), return it
+                return result.get('response_text', f"ERROR: {result.get('message', 'Unknown error')}")
+        
+        # If we got here due to bad site or empty response after retries, continue to next site
+        if _is_bad_site_response(result) or site_has_empty_response:
             continue  # Try next site
-        
-        # Got a valid response (not a bad site issue), return it
-        return result.get('response_text', f"ERROR: {result.get('message', 'Unknown error')}")
     
     # All retries exhausted - all sites were bad or returned empty responses
     # Return a meaningful error message with BIN info
