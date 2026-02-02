@@ -1035,6 +1035,35 @@ def _is_empty_response(result: Dict[str, Any]) -> bool:
     return False
 
 
+def _is_bad_site_response(result: Dict[str, Any]) -> bool:
+    """Check if the result indicates a bad site that should trigger retry with different site"""
+    if not result:
+        return False
+    
+    message = result.get('message', '').lower()
+    
+    # Check for bad site detection flag
+    if result.get('bad_site_detected', False):
+        return True
+    
+    # Check for specific bad site patterns in message
+    bad_patterns = [
+        'out of stock',
+        'cannot find product id',
+        'product not found',
+        'bad site detected',
+        'failed to load product page',
+        'failed to load checkout',
+        'cart is empty',
+    ]
+    
+    for pattern in bad_patterns:
+        if pattern in message:
+            return True
+    
+    return False
+
+
 async def check_single_card(card_details: str, site_urls: List[str], proxy: Optional[str] = None) -> str:
     """Check a single card asynchronously with bad site handling and empty response retry"""
     global _session
@@ -1055,7 +1084,7 @@ async def check_single_card(card_details: str, site_urls: List[str], proxy: Opti
     sites_to_try = available_sites.copy()
     random.shuffle(sites_to_try)
     
-    max_retries = min(3, len(sites_to_try))  # Try up to 3 different sites
+    max_retries = min(5, len(sites_to_try))  # Try up to 5 different sites for bad site issues
     tried_sites = []
     last_result = None
     
@@ -1072,23 +1101,27 @@ async def check_single_card(card_details: str, site_urls: List[str], proxy: Opti
         result = await checker.check()
         last_result = result
         
+        # Check if response indicates a bad site (out of stock, cannot find product ID, etc.)
+        # If bad site detected, the site is already moved to badsites.txt by the checker
+        # Don't send response, just retry with a different site
+        if _is_bad_site_response(result):
+            logger.warning(f"Bad site detected: {site_url} - {result.get('message', 'Unknown')}. Retrying with different site...")
+            continue  # Try next site without sending response
+        
         # Check if response is empty or has no meaningful message
         if _is_empty_response(result):
             logger.warning(f"Empty response from site {site_url}, will retry with different site")
             
-            # If this is the last attempt, mark the site as bad
-            if attempt == max_retries - 1:
-                # Mark all tried sites as potentially bad (empty response)
-                for bad_site in tried_sites:
-                    add_bad_site(bad_site, "Empty response - no payment result")
-                    logger.info(f"Marked site as bad due to empty response: {bad_site}")
+            # Mark site as bad for empty response
+            add_bad_site(site_url, "Empty response - no payment result")
+            logger.info(f"Marked site as bad due to empty response: {site_url}")
             
             continue  # Try next site
         
-        # Got a valid response, return it
+        # Got a valid response (not a bad site issue), return it
         return result.get('response_text', f"ERROR: {result.get('message', 'Unknown error')}")
     
-    # All retries exhausted with empty responses
+    # All retries exhausted - all sites were bad or returned empty responses
     # Return a meaningful error message with BIN info
     start_time = time.time()
     bin_info = await BinChecker.check(card_details.split('|')[0][:6], UserAgentGenerator.get())
@@ -1098,7 +1131,7 @@ async def check_single_card(card_details: str, site_urls: List[str], proxy: Opti
 
 𝗖𝗖 ⇾ {card_details}
 𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Ppcp-gateway
-𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ All sites returned empty response - sites marked as bad
+𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ All sites unavailable (out of stock/product issues) - tried {len(tried_sites)} sites
 
 𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'Unknown')} - {bin_info.get('type', 'Unknown')} - {bin_info.get('level', 'Unknown')}
 𝗕𝗮𝗻𝗸: {bin_info.get('issuer', 'Unknown')}

@@ -71,6 +71,7 @@ BAD_SITE_PATTERNS = [
     'your cart is currently empty',
     'no items in cart',
     'cannot find product',
+    'cannot find product id',
     'product not found',
     'page not found',
     '404 not found',
