@@ -910,11 +910,16 @@ def check_ppcp_card(card_details: str, site_urls: List[str]) -> str:
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # If already in async context, create new loop
-            import nest_asyncio
-            nest_asyncio.apply()
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            # If already in async context, try to use nest_asyncio
+            try:
+                import nest_asyncio
+                nest_asyncio.apply()
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            except ImportError:
+                # If nest_asyncio is not available, create a new loop manually
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
         return loop.run_until_complete(check_single_card(card_details, site_urls))
     except Exception as e:
         logger.error(f"Error in sync wrapper: {e}")
