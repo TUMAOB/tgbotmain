@@ -7,6 +7,7 @@ import threading
 import logging
 import time
 import fcntl
+import json
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ SITES_FILE = 'ppcp/sites.txt'
 BADSITES_FILE = 'ppcp/badsites.txt'
 SITES_LOCK_FILE = 'ppcp/sites.txt.lock'
 BADSITES_LOCK_FILE = 'ppcp/badsites.txt.lock'
+PPCP_AUTO_REMOVE_SETTINGS_FILE = 'ppcp_auto_remove_settings.json'
 
 # Bad site patterns - responses that indicate site should be removed
 BAD_SITE_PATTERNS = [
@@ -97,6 +99,18 @@ BAD_SITE_PATTERNS = [
 _file_lock = threading.Lock()
 
 
+def is_auto_remove_enabled() -> bool:
+    """Check if auto-remove is enabled"""
+    try:
+        if os.path.exists(PPCP_AUTO_REMOVE_SETTINGS_FILE):
+            with open(PPCP_AUTO_REMOVE_SETTINGS_FILE, 'r') as f:
+                settings = json.load(f)
+                return settings.get('enabled', True)  # Default to True for backward compatibility
+    except Exception as e:
+        logger.error(f"Error loading auto-remove settings: {e}")
+    return True  # Default to enabled
+
+
 def load_sites() -> List[str]:
     """Load sites from sites.txt file with thread safety"""
     try:
@@ -139,6 +153,11 @@ def load_bad_sites() -> List[str]:
 
 def add_bad_site(site_url: str, reason: str) -> bool:
     """Add a site to badsites.txt and remove from sites.txt"""
+    
+    # Check if auto-remove is enabled
+    if not is_auto_remove_enabled():
+        logger.info(f"Auto-remove is disabled. Skipping bad site removal for: {site_url}")
+        return False
     
     try:
         # Normalize URL
