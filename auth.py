@@ -42,6 +42,14 @@ AUTO_SCAN_SETTINGS_LOCK_FILE = 'auto_scan_settings.json.lock'
 PPCP_AUTO_REMOVE_SETTINGS_FILE = 'ppcp_auto_remove_settings.json'
 PPCP_AUTO_REMOVE_SETTINGS_LOCK_FILE = 'ppcp_auto_remove_settings.json.lock'
 
+# Mass check settings file (enable/disable mass checking per gateway)
+MASS_SETTINGS_FILE = 'mass_settings.json'
+MASS_SETTINGS_LOCK_FILE = 'mass_settings.json.lock'
+
+# Bot settings file (start message, etc.)
+BOT_SETTINGS_FILE = 'bot_settings.json'
+BOT_SETTINGS_LOCK_FILE = 'bot_settings.json.lock'
+
 # Forward channel ID (set to None to disable forwarding, or use channel username like '@yourchannel' or channel ID like -1001234567890)
 FORWARD_CHANNEL_ID = -1003865829143  # Replace with your channel ID or username
 
@@ -359,6 +367,128 @@ def remove_ppcp_site(site_url):
         save_ppcp_sites(sites)
         return True
     return False
+
+# ============= PAYPALPRO SITES FUNCTIONS =============
+
+def load_paypalpro_sites():
+    """Load PayPal Pro sites from paypalpro/sites.txt"""
+    sites = []
+    sites_file = 'paypalpro/sites.txt'
+    if os.path.exists(sites_file):
+        with open(sites_file, 'r') as f:
+            sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+    return sites
+
+def save_paypalpro_sites(sites):
+    """Save PayPal Pro sites to paypalpro/sites.txt"""
+    sites_file = 'paypalpro/sites.txt'
+    os.makedirs('paypalpro', exist_ok=True)
+    with open(sites_file, 'w') as f:
+        for site in sites:
+            if site.strip():
+                f.write(site.strip() + '\n')
+    return True
+
+def add_paypalpro_site(site_url):
+    """Add a site to PayPal Pro sites"""
+    sites = load_paypalpro_sites()
+    if site_url not in sites:
+        sites.append(site_url)
+        save_paypalpro_sites(sites)
+        return True
+    return False
+
+def remove_paypalpro_site(site_url):
+    """Remove a site from PayPal Pro sites"""
+    sites = load_paypalpro_sites()
+    if site_url in sites:
+        sites.remove(site_url)
+        save_paypalpro_sites(sites)
+        return True
+    return False
+
+# ============= MASS SETTINGS FUNCTIONS =============
+
+def load_mass_settings():
+    """Load mass check settings from file"""
+    lock = SoftFileLock(MASS_SETTINGS_LOCK_FILE, timeout=10)
+    with lock:
+        if os.path.exists(MASS_SETTINGS_FILE):
+            try:
+                with open(MASS_SETTINGS_FILE, 'r') as f:
+                    return json.load(f)
+            except:
+                pass
+        # Default: all gateways enabled for mass checking
+        return {
+            'b3': True,   # Braintree Auth
+            'pp': True,   # PPCP
+            'ppro': True  # PayPal Pro
+        }
+
+def save_mass_settings(settings):
+    """Save mass check settings to file"""
+    lock = SoftFileLock(MASS_SETTINGS_LOCK_FILE, timeout=10)
+    with lock:
+        with open(MASS_SETTINGS_FILE, 'w') as f:
+            json.dump(settings, f, indent=2)
+
+def is_mass_enabled(gateway):
+    """Check if mass checking is enabled for a gateway"""
+    settings = load_mass_settings()
+    return settings.get(gateway, True)
+
+def toggle_mass_setting(gateway):
+    """Toggle mass checking for a gateway"""
+    settings = load_mass_settings()
+    settings[gateway] = not settings.get(gateway, True)
+    save_mass_settings(settings)
+    return settings[gateway]
+
+# ============= BOT SETTINGS FUNCTIONS =============
+
+def load_bot_settings():
+    """Load bot settings from file"""
+    lock = SoftFileLock(BOT_SETTINGS_LOCK_FILE, timeout=10)
+    with lock:
+        if os.path.exists(BOT_SETTINGS_FILE):
+            try:
+                with open(BOT_SETTINGS_FILE, 'r') as f:
+                    return json.load(f)
+            except:
+                pass
+        # Default settings
+        return {
+            'start_message': None,  # None means use default
+            'pinned_message': None,
+            'pinned_message_id': None
+        }
+
+def save_bot_settings(settings):
+    """Save bot settings to file"""
+    lock = SoftFileLock(BOT_SETTINGS_LOCK_FILE, timeout=10)
+    with lock:
+        with open(BOT_SETTINGS_FILE, 'w') as f:
+            json.dump(settings, f, indent=2)
+
+def get_start_message():
+    """Get custom start message or None for default"""
+    settings = load_bot_settings()
+    return settings.get('start_message')
+
+def set_start_message(message):
+    """Set custom start message"""
+    settings = load_bot_settings()
+    settings['start_message'] = message
+    save_bot_settings(settings)
+    return True
+
+def reset_start_message():
+    """Reset start message to default"""
+    settings = load_bot_settings()
+    settings['start_message'] = None
+    save_bot_settings(settings)
+    return True
 
 def is_site_frozen(site_folder):
     """Check if a site is frozen"""
@@ -1227,11 +1357,22 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
     user_id = update.effective_user.id
     username = update.effective_user.username or "User"
+    first_name = update.effective_user.first_name or "User"
     
     # Check if user is admin and show admin commands
     is_admin = user_id == ADMIN_ID
     
-    welcome_message = f"""
+    # Check for custom start message
+    custom_message = get_start_message()
+    
+    if custom_message:
+        # Use custom start message with placeholder replacement
+        welcome_message = custom_message.replace('{username}', username)
+        welcome_message = welcome_message.replace('{user_id}', str(user_id))
+        welcome_message = welcome_message.replace('{first_name}', first_name)
+    else:
+        # Use default start message
+        welcome_message = f"""
 👋 Welcome to the Card Checker Bot, @{username}!
 
 🔐 To use this bot, you need admin approval.
@@ -1257,7 +1398,9 @@ Commands:
 /status - View active mass checks
 """
     
-    welcome_message += """
+    # Only add examples if using default message
+    if not custom_message:
+        welcome_message += """
 Single Card Examples:
 /b3 5156123456789876|11|29|384
 /pp 4315037547717888|10|28|852
@@ -1397,6 +1540,15 @@ async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ You don't have access to use this bot.\n"
             f"Your User ID: `{user_id}`\n\n"
             "Please contact @TUMAOB for approval.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Check if mass checking is enabled for B3
+    if not is_mass_enabled('b3'):
+        await update.message.reply_text(
+            "❌ Mass checking is currently disabled for B3 gateway.\n\n"
+            "Please use /b3 for single card checking or contact admin.",
             parse_mode='Markdown'
         )
         return
@@ -1656,6 +1808,15 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     else:
         # Mass checking with STREAMING results - each result sent immediately as it completes
+        # Check if mass checking is enabled for PP
+        if not is_mass_enabled('pp'):
+            await update.message.reply_text(
+                "❌ Mass checking is currently disabled for PP (PPCP) gateway.\n\n"
+                "Please use /pp for single card checking or contact admin.",
+                parse_mode='Markdown'
+            )
+            return
+        
         # Check if user can start a mass check (prevents single user from blocking system)
         can_start, error_msg = can_start_mass_check(user_id)
         if not can_start:
@@ -1866,6 +2027,15 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     else:
         # Mass checking
+        # Check if mass checking is enabled for PPRO
+        if not is_mass_enabled('ppro'):
+            await update.message.reply_text(
+                "❌ Mass checking is currently disabled for PPRO (PayPal Pro) gateway.\n\n"
+                "Please use /pro for single card checking or contact admin.",
+                parse_mode='Markdown'
+            )
+            return
+        
         # Check if user can start a mass check (prevents single user from blocking system)
         can_start, error_msg = can_start_mass_check(user_id)
         if not can_start:
@@ -2120,6 +2290,9 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 InlineKeyboardButton("🔗 PPCP Sites", callback_data='settings_ppcp_sites'),
             ],
             [
+                InlineKeyboardButton("💳 PayPal Pro Sites", callback_data='settings_paypalpro_sites'),
+            ],
+            [
                 InlineKeyboardButton("📡 B3 Forwarders", callback_data='settings_forwarders_b3'),
             ],
             [
@@ -2130,6 +2303,15 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             ],
             [
                 InlineKeyboardButton("⏰ Auto-Scan Settings", callback_data='settings_auto_scan'),
+            ],
+            [
+                InlineKeyboardButton("🔄 Mass Check Settings", callback_data='settings_mass'),
+            ],
+            [
+                InlineKeyboardButton("📝 Start Message", callback_data='settings_start_message'),
+            ],
+            [
+                InlineKeyboardButton("📢 Send & Pin Message", callback_data='settings_broadcast'),
             ],
             [
                 InlineKeyboardButton("⬅️ Back", callback_data='admin_back_main'),
@@ -2410,6 +2592,99 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
     elif action.startswith('settings_forwarders_'):
         # Forward to forwarders_callback_handler
         await forwarders_callback_handler(update, context)
+    
+    elif action == 'settings_paypalpro_sites':
+        # Show PayPal Pro sites management
+        sites = load_paypalpro_sites()
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Add Site", callback_data='ppro_add_site')],
+        ]
+        
+        if sites:
+            keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='ppro_view_sites')])
+            keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='ppro_remove_site')])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"💳 *PayPal Pro Sites*\n\nTotal sites: {len(sites)}\n\nSelect an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'settings_mass':
+        # Show mass check settings
+        settings = load_mass_settings()
+        
+        b3_status = "🟢 ON" if settings.get('b3', True) else "🔴 OFF"
+        pp_status = "🟢 ON" if settings.get('pp', True) else "🔴 OFF"
+        ppro_status = "🟢 ON" if settings.get('ppro', True) else "🔴 OFF"
+        
+        keyboard = [
+            [InlineKeyboardButton(f"B3 Mass: {b3_status}", callback_data='mass_toggle_b3')],
+            [InlineKeyboardButton(f"PP Mass: {pp_status}", callback_data='mass_toggle_pp')],
+            [InlineKeyboardButton(f"PPRO Mass: {ppro_status}", callback_data='mass_toggle_ppro')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🔄 *Mass Check Settings*\n\n"
+            "Enable or disable mass checking for each gateway:\n\n"
+            f"• B3 (Braintree Auth): {b3_status}\n"
+            f"• PP (PPCP): {pp_status}\n"
+            f"• PPRO (PayPal Pro): {ppro_status}\n\n"
+            "Click to toggle:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'settings_start_message':
+        # Show start message settings
+        current_message = get_start_message()
+        
+        keyboard = [
+            [InlineKeyboardButton("✏️ Edit Start Message", callback_data='startmsg_edit')],
+            [InlineKeyboardButton("🔄 Reset to Default", callback_data='startmsg_reset')],
+            [InlineKeyboardButton("👁️ Preview Current", callback_data='startmsg_preview')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        status = "Custom message set" if current_message else "Using default message"
+        
+        await query.edit_message_text(
+            f"📝 *Start Message Settings*\n\n"
+            f"Status: {status}\n\n"
+            "The start message is shown when users send /start command.\n\n"
+            "Select an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'settings_broadcast':
+        # Show broadcast/pin message settings
+        keyboard = [
+            [InlineKeyboardButton("📢 Send Message to All Users", callback_data='broadcast_send')],
+            [InlineKeyboardButton("📌 Send & Pin Message", callback_data='broadcast_pin')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Count users
+        db = load_user_db()
+        user_count = len(db)
+        
+        await query.edit_message_text(
+            f"📢 *Send & Pin Message*\n\n"
+            f"Total users in database: {user_count}\n\n"
+            "Send a message to all approved users or send and pin a message.\n\n"
+            "Select an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
 
 async def forwarders_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle forwarder settings callbacks"""
@@ -3101,6 +3376,383 @@ pending_ppcp_actions = {}
 pending_ppcp_actions_lock = threading.Lock()
 
 
+async def paypalpro_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle PayPal Pro sites callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
+        return
+    
+    action = query.data
+    
+    if action == 'ppro_add_site':
+        # Store pending action
+        with pending_ppcp_actions_lock:
+            pending_ppcp_actions[user_id] = {'action': 'add_ppro_site'}
+        
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='ppro_cancel')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "➕ *Add PayPal Pro Site*\n\n"
+            "Please send the product page URL (e.g., https://example.com/product/item):",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'ppro_view_sites':
+        sites = load_paypalpro_sites()
+        
+        if not sites:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='settings_paypalpro_sites')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "📋 *PayPal Pro Sites*\n\nNo sites found.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        sites_list = "\n".join([f"• {site}" for site in sites])
+        
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='settings_paypalpro_sites')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"📋 *PayPal Pro Sites* ({len(sites)} total)\n\n{sites_list}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'ppro_remove_site':
+        sites = load_paypalpro_sites()
+        
+        if not sites:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='settings_paypalpro_sites')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "➖ *Remove PayPal Pro Site*\n\nNo sites to remove.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        keyboard = []
+        for i, site in enumerate(sites):
+            # Truncate long URLs for button display
+            display_name = site[:30] + "..." if len(site) > 30 else site
+            keyboard.append([InlineKeyboardButton(f"🗑️ {display_name}", callback_data=f'ppro_del_{i}')])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='settings_paypalpro_sites')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "➖ *Remove PayPal Pro Site*\n\nSelect a site to remove:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('ppro_del_'):
+        index = int(action.replace('ppro_del_', ''))
+        sites = load_paypalpro_sites()
+        
+        if 0 <= index < len(sites):
+            removed_site = sites[index]
+            remove_paypalpro_site(removed_site)
+            
+            await query.edit_message_text(
+                f"✅ *Site Removed*\n\n{removed_site}",
+                parse_mode='Markdown'
+            )
+            
+            # Show updated list after a moment
+            await asyncio.sleep(1)
+            
+            # Redirect back to PayPal Pro sites menu
+            sites = load_paypalpro_sites()
+            
+            keyboard = [
+                [InlineKeyboardButton("➕ Add Site", callback_data='ppro_add_site')],
+            ]
+            if sites:
+                keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='ppro_view_sites')])
+                keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='ppro_remove_site')])
+            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                f"💳 *PayPal Pro Sites*\n\nTotal sites: {len(sites)}\n\nSelect an option:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text("❌ Invalid site index.")
+    
+    elif action == 'ppro_cancel':
+        # Cancel pending action
+        with pending_ppcp_actions_lock:
+            if user_id in pending_ppcp_actions:
+                del pending_ppcp_actions[user_id]
+        
+        # Redirect back to PayPal Pro sites menu
+        sites = load_paypalpro_sites()
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Add Site", callback_data='ppro_add_site')],
+        ]
+        if sites:
+            keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='ppro_view_sites')])
+            keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='ppro_remove_site')])
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"💳 *PayPal Pro Sites*\n\nTotal sites: {len(sites)}\n\nSelect an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+
+async def mass_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle mass check settings callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
+        return
+    
+    action = query.data
+    
+    if action.startswith('mass_toggle_'):
+        gateway = action.replace('mass_toggle_', '')
+        new_status = toggle_mass_setting(gateway)
+        
+        # Refresh the menu
+        settings = load_mass_settings()
+        
+        b3_status = "🟢 ON" if settings.get('b3', True) else "🔴 OFF"
+        pp_status = "🟢 ON" if settings.get('pp', True) else "🔴 OFF"
+        ppro_status = "🟢 ON" if settings.get('ppro', True) else "🔴 OFF"
+        
+        gateway_names = {'b3': 'B3', 'pp': 'PP', 'ppro': 'PPRO'}
+        toggled_name = gateway_names.get(gateway, gateway.upper())
+        toggled_status = "🟢 ON" if new_status else "🔴 OFF"
+        
+        keyboard = [
+            [InlineKeyboardButton(f"B3 Mass: {b3_status}", callback_data='mass_toggle_b3')],
+            [InlineKeyboardButton(f"PP Mass: {pp_status}", callback_data='mass_toggle_pp')],
+            [InlineKeyboardButton(f"PPRO Mass: {ppro_status}", callback_data='mass_toggle_ppro')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"🔄 *Mass Check Settings*\n\n"
+            f"✅ {toggled_name} mass checking is now {toggled_status}\n\n"
+            f"• B3 (Braintree Auth): {b3_status}\n"
+            f"• PP (PPCP): {pp_status}\n"
+            f"• PPRO (PayPal Pro): {ppro_status}\n\n"
+            "Click to toggle:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+
+async def startmsg_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle start message settings callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
+        return
+    
+    action = query.data
+    
+    if action == 'startmsg_edit':
+        # Store pending action
+        with pending_ppcp_actions_lock:
+            pending_ppcp_actions[user_id] = {'action': 'edit_start_message'}
+        
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='startmsg_cancel')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "✏️ *Edit Start Message*\n\n"
+            "Please send the new start message.\n\n"
+            "You can use these placeholders:\n"
+            "• `{username}` - User's username\n"
+            "• `{user_id}` - User's ID\n"
+            "• `{first_name}` - User's first name\n\n"
+            "Example:\n"
+            "Welcome {first_name}! Your ID is {user_id}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'startmsg_reset':
+        reset_start_message()
+        
+        keyboard = [
+            [InlineKeyboardButton("✏️ Edit Start Message", callback_data='startmsg_edit')],
+            [InlineKeyboardButton("🔄 Reset to Default", callback_data='startmsg_reset')],
+            [InlineKeyboardButton("👁️ Preview Current", callback_data='startmsg_preview')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "📝 *Start Message Settings*\n\n"
+            "✅ Start message has been reset to default.\n\n"
+            "Select an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'startmsg_preview':
+        current_message = get_start_message()
+        
+        keyboard = [
+            [InlineKeyboardButton("✏️ Edit Start Message", callback_data='startmsg_edit')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='settings_start_message')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if current_message:
+            # Show custom message preview
+            preview = current_message.replace('{username}', 'TestUser').replace('{user_id}', '123456789').replace('{first_name}', 'Test')
+            await query.edit_message_text(
+                f"👁️ *Start Message Preview*\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"{preview}\n"
+                f"━━━━━━━━━━━━━━━━━━━━",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text(
+                "👁️ *Start Message Preview*\n\n"
+                "Currently using the default start message.\n\n"
+                "The default message includes:\n"
+                "• Welcome greeting\n"
+                "• User ID display\n"
+                "• Available commands\n"
+                "• Card format examples",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+    
+    elif action == 'startmsg_cancel':
+        # Cancel pending action
+        with pending_ppcp_actions_lock:
+            if user_id in pending_ppcp_actions:
+                del pending_ppcp_actions[user_id]
+        
+        current_message = get_start_message()
+        
+        keyboard = [
+            [InlineKeyboardButton("✏️ Edit Start Message", callback_data='startmsg_edit')],
+            [InlineKeyboardButton("🔄 Reset to Default", callback_data='startmsg_reset')],
+            [InlineKeyboardButton("👁️ Preview Current", callback_data='startmsg_preview')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        status = "Custom message set" if current_message else "Using default message"
+        
+        await query.edit_message_text(
+            f"📝 *Start Message Settings*\n\n"
+            f"Status: {status}\n\n"
+            "Select an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+
+async def broadcast_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle broadcast/pin message callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
+        return
+    
+    action = query.data
+    
+    if action == 'broadcast_send':
+        # Store pending action
+        with pending_ppcp_actions_lock:
+            pending_ppcp_actions[user_id] = {'action': 'broadcast_send'}
+        
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='broadcast_cancel')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "📢 *Send Message to All Users*\n\n"
+            "Please send the message you want to broadcast to all approved users.\n\n"
+            "⚠️ This will send a message to ALL users in the database.",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'broadcast_pin':
+        # Store pending action
+        with pending_ppcp_actions_lock:
+            pending_ppcp_actions[user_id] = {'action': 'broadcast_pin'}
+        
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='broadcast_cancel')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "📌 *Send & Pin Message*\n\n"
+            "Please send the message you want to broadcast and pin to all approved users.\n\n"
+            "⚠️ This will send AND PIN a message to ALL users in the database.",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'broadcast_cancel':
+        # Cancel pending action
+        with pending_ppcp_actions_lock:
+            if user_id in pending_ppcp_actions:
+                del pending_ppcp_actions[user_id]
+        
+        # Redirect back to broadcast menu
+        db = load_user_db()
+        user_count = len(db)
+        
+        keyboard = [
+            [InlineKeyboardButton("📢 Send Message to All Users", callback_data='broadcast_send')],
+            [InlineKeyboardButton("📌 Send & Pin Message", callback_data='broadcast_pin')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"📢 *Send & Pin Message*\n\n"
+            f"Total users in database: {user_count}\n\n"
+            "Select an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+
 async def ppcp_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle PPCP sites callbacks"""
     query = update.callback_query
@@ -3701,6 +4353,136 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
                         parse_mode='Markdown'
                     )
                 return
+            
+            elif action_type == 'add_ppro_site':
+                # Adding PayPal Pro site
+                del pending_ppcp_actions[user_id]
+                
+                site_url = message_text.strip()
+                
+                # Validate URL
+                if not site_url.startswith('http://') and not site_url.startswith('https://'):
+                    await update.message.reply_text(
+                        "❌ Invalid URL. Please provide a valid URL starting with http:// or https://",
+                        parse_mode='Markdown'
+                    )
+                    return
+                
+                if add_paypalpro_site(site_url):
+                    await update.message.reply_text(
+                        f"✅ *PayPal Pro Site Added Successfully*\n\n{site_url}",
+                        parse_mode='Markdown'
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"⚠️ Site already exists or failed to add:\n{site_url}",
+                        parse_mode='Markdown'
+                    )
+                return
+            
+            elif action_type == 'edit_start_message':
+                # Editing start message
+                del pending_ppcp_actions[user_id]
+                
+                new_message = message_text.strip()
+                set_start_message(new_message)
+                
+                await update.message.reply_text(
+                    f"✅ *Start Message Updated Successfully*\n\n"
+                    f"New message preview:\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{new_message[:500]}{'...' if len(new_message) > 500 else ''}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            elif action_type == 'broadcast_send':
+                # Broadcasting message to all users
+                del pending_ppcp_actions[user_id]
+                
+                broadcast_message = message_text.strip()
+                db = load_user_db()
+                
+                success_count = 0
+                fail_count = 0
+                
+                status_msg = await update.message.reply_text(
+                    f"📢 *Broadcasting...*\n\nSending to {len(db)} users...",
+                    parse_mode='Markdown'
+                )
+                
+                for target_user_id in db.keys():
+                    try:
+                        await context.bot.send_message(
+                            chat_id=int(target_user_id),
+                            text=broadcast_message
+                        )
+                        success_count += 1
+                    except Exception as e:
+                        fail_count += 1
+                        print(f"Failed to send to {target_user_id}: {e}")
+                    
+                    # Small delay to avoid rate limiting
+                    await asyncio.sleep(0.05)
+                
+                await status_msg.edit_text(
+                    f"📢 *Broadcast Complete*\n\n"
+                    f"✅ Sent: {success_count}\n"
+                    f"❌ Failed: {fail_count}",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            elif action_type == 'broadcast_pin':
+                # Broadcasting and pinning message to all users
+                del pending_ppcp_actions[user_id]
+                
+                broadcast_message = message_text.strip()
+                db = load_user_db()
+                
+                success_count = 0
+                pin_count = 0
+                fail_count = 0
+                
+                status_msg = await update.message.reply_text(
+                    f"📌 *Broadcasting & Pinning...*\n\nSending to {len(db)} users...",
+                    parse_mode='Markdown'
+                )
+                
+                for target_user_id in db.keys():
+                    try:
+                        sent_msg = await context.bot.send_message(
+                            chat_id=int(target_user_id),
+                            text=broadcast_message
+                        )
+                        success_count += 1
+                        
+                        # Try to pin the message
+                        try:
+                            await context.bot.pin_chat_message(
+                                chat_id=int(target_user_id),
+                                message_id=sent_msg.message_id,
+                                disable_notification=True
+                            )
+                            pin_count += 1
+                        except Exception as pin_error:
+                            print(f"Failed to pin for {target_user_id}: {pin_error}")
+                    except Exception as e:
+                        fail_count += 1
+                        print(f"Failed to send to {target_user_id}: {e}")
+                    
+                    # Small delay to avoid rate limiting
+                    await asyncio.sleep(0.05)
+                
+                await status_msg.edit_text(
+                    f"📌 *Broadcast & Pin Complete*\n\n"
+                    f"✅ Sent: {success_count}\n"
+                    f"📌 Pinned: {pin_count}\n"
+                    f"❌ Failed: {fail_count}",
+                    parse_mode='Markdown'
+                )
+                return
     
     # Check if there's a pending file edit (thread-safe)
     with pending_file_edits_lock:
@@ -3959,6 +4741,10 @@ def main():
     application.add_handler(CallbackQueryHandler(b3info_callback_handler, pattern=r'^b3info_'))
     application.add_handler(CallbackQueryHandler(b3test_callback_handler, pattern=r'^b3test'))
     application.add_handler(CallbackQueryHandler(ppcp_callback_handler, pattern=r'^ppcp_'))
+    application.add_handler(CallbackQueryHandler(paypalpro_callback_handler, pattern=r'^ppro_'))
+    application.add_handler(CallbackQueryHandler(mass_callback_handler, pattern=r'^mass_'))
+    application.add_handler(CallbackQueryHandler(startmsg_callback_handler, pattern=r'^startmsg_'))
+    application.add_handler(CallbackQueryHandler(broadcast_callback_handler, pattern=r'^broadcast_'))
     application.add_handler(CallbackQueryHandler(autoscan_callback_handler, pattern=r'^autoscan_'))
     application.add_handler(CallbackQueryHandler(mods_callback_handler, pattern=r'^mods_'))
     
