@@ -314,6 +314,8 @@ def normalize_card_format(card_input):
             # Normalize year to 2 digits
             if len(yy) == 4:
                 yy = yy[2:]
+            # Normalize month to 2 digits with leading zero
+            mm = mm.zfill(2)
             return f"{number}|{mm}|{yy}|{cvv}"
         return None
     
@@ -327,6 +329,35 @@ def normalize_card_format(card_input):
             return f"{number}|{mm}|{yy}|{cvv}"
     
     return None
+
+
+def is_card_expired(month, year):
+    """
+    Check if a card is expired based on month and year.
+    Returns True if expired, False otherwise.
+    """
+    import datetime
+    
+    # Normalize year to 4 digits
+    if len(str(year)) == 2:
+        year = int('20' + str(year))
+    else:
+        year = int(year)
+    
+    month = int(month)
+    
+    # Get current date
+    now = datetime.datetime.now()
+    current_year = now.year
+    current_month = now.month
+    
+    # Card is valid through the end of the expiration month
+    if year < current_year:
+        return True
+    elif year == current_year and month < current_month:
+        return True
+    
+    return False
 
 
 _sites_cache = None
@@ -412,6 +443,21 @@ def check_card(card_input, proxy=None, sites=None):
     # Format month
     mes_with_zero = mes.zfill(2)
     mes_no_zero = mes.lstrip('0') or '0'
+    
+    # Validate expiration date
+    if is_card_expired(mes_with_zero, ano_short):
+        # Get BIN info for expired card response
+        bin_info = get_bin_info(cc6)
+        return {
+            'status': 'DECLINED',
+            'approved': False,
+            'message': 'Card expiration date is invalid (EXPIRED)',
+            'card': card_input,
+            'site': 'N/A',
+            'price': 'N/A',
+            'bin_info': bin_info,
+            'time': '0.00s',
+        }
     
     # Get user agent
     ua = random.choice(USER_AGENTS)
@@ -786,9 +832,21 @@ def format_result(result):
     
     bank_str = bin_info.get('bank', 'Unknown')
     
+    # Determine status header with emoji
+    if status == 'CVV':
+        status_header = "#CVV ✅"
+    elif status == 'CCN':
+        status_header = "#CCN ✅"
+    elif status == 'DECLINED':
+        status_header = "#DECLINED ❌"
+    else:
+        status_header = "#ERROR ❌"
+    
     # Format for CVV, CCN, and DECLINED statuses
     if status in ('CVV', 'CCN', 'DECLINED'):
-        result_text = f"""𝗖𝗖 ⇾ {card}
+        result_text = f"""{status_header}
+
+𝗖𝗖 ⇾ {card}
 𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Paypal Pro
 𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ {message}
 
@@ -800,7 +858,7 @@ def format_result(result):
 𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB"""
     else:
         # ERROR status - keep minimal format
-        result_text = f"""#ERROR ❌
+        result_text = f"""{status_header}
 
 𝗖𝗖 ⇾ {card}
 𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Paypal Pro
