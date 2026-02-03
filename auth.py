@@ -131,10 +131,14 @@ def load_forwarders_db():
         if os.path.exists(FORWARDERS_DB_FILE):
             try:
                 with open(FORWARDERS_DB_FILE, 'r') as f:
-                    return json.load(f)
+                    db = json.load(f)
+                    # Ensure all gateways exist (for backward compatibility)
+                    if 'ppro' not in db:
+                        db['ppro'] = []
+                    return db
             except:
-                return {'b3': [], 'pp': []}
-        return {'b3': [], 'pp': []}
+                return {'b3': [], 'pp': [], 'ppro': []}
+        return {'b3': [], 'pp': [], 'ppro': []}
 
 def save_forwarders_db(db):
     """Save forwarders database to file with file locking for thread safety"""
@@ -1853,7 +1857,7 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Forward to channel if approved
             if result.get('approved', False):
-                await forward_to_channel(context, normalized_cards[0], formatted_result, gateway='pp')
+                await forward_to_channel(context, normalized_cards[0], formatted_result, gateway='ppro')
 
         except Exception as e:
             error_message = f"❌ Error checking card: {str(e)}"
@@ -1910,7 +1914,7 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if result.get('approved', False):
                         approved_count += 1
                         # Forward to channel if approved
-                        await forward_to_channel(context, card, formatted_result, gateway='pp')
+                        await forward_to_channel(context, card, formatted_result, gateway='ppro')
                     else:
                         declined_count += 1
 
@@ -2120,6 +2124,9 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             ],
             [
                 InlineKeyboardButton("📡 PP Forwarders", callback_data='settings_forwarders_pp'),
+            ],
+            [
+                InlineKeyboardButton("📡 PPRO Forwarders", callback_data='settings_forwarders_ppro'),
             ],
             [
                 InlineKeyboardButton("⏰ Auto-Scan Settings", callback_data='settings_auto_scan'),
@@ -2426,7 +2433,8 @@ async def forwarders_callback_handler(update: Update, context: ContextTypes.DEFA
     # Determine gateway from action
     if action.startswith('settings_forwarders_'):
         gateway = action.replace('settings_forwarders_', '')
-        gateway_name = "B3" if gateway == "b3" else "PP"
+        gateway_names = {"b3": "B3", "pp": "PP", "ppro": "PPRO"}
+        gateway_name = gateway_names.get(gateway, gateway.upper())
         
         # Show forwarders list
         forwarders = get_forwarders(gateway)
@@ -2454,7 +2462,8 @@ async def forwarders_callback_handler(update: Update, context: ContextTypes.DEFA
     
     elif action.startswith('fwd_add_'):
         gateway = action.replace('fwd_add_', '')
-        gateway_name = "B3" if gateway == "b3" else "PP"
+        gateway_names = {"b3": "B3", "pp": "PP", "ppro": "PPRO"}
+        gateway_name = gateway_names.get(gateway, gateway.upper())
         
         # Store the gateway in user context for the next message
         context.user_data['forwarder_action'] = 'add'
@@ -2476,7 +2485,8 @@ async def forwarders_callback_handler(update: Update, context: ContextTypes.DEFA
         parts = action.split('_')
         gateway = parts[2]
         idx = int(parts[3])
-        gateway_name = "B3" if gateway == "b3" else "PP"
+        gateway_names = {"b3": "B3", "pp": "PP", "ppro": "PPRO"}
+        gateway_name = gateway_names.get(gateway, gateway.upper())
         
         forwarders = get_forwarders(gateway)
         if idx >= len(forwarders):
@@ -2585,7 +2595,8 @@ async def forwarders_callback_handler(update: Update, context: ContextTypes.DEFA
         parts = action.split('_')
         gateway = parts[2]
         idx = int(parts[3])
-        gateway_name = "B3" if gateway == "b3" else "PP"
+        gateway_names = {"b3": "B3", "pp": "PP", "ppro": "PPRO"}
+        gateway_name = gateway_names.get(gateway, gateway.upper())
         
         forwarders = get_forwarders(gateway)
         if idx >= len(forwarders):
@@ -3544,7 +3555,8 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
     if 'forwarder_action' in context.user_data:
         action = context.user_data.get('forwarder_action')
         gateway = context.user_data.get('forwarder_gateway')
-        gateway_name = "B3" if gateway == "b3" else "PP"
+        gateway_names = {"b3": "B3", "pp": "PP", "ppro": "PPRO"}
+        gateway_name = gateway_names.get(gateway, gateway.upper())
         
         if action == 'add':
             step = context.user_data.get('forwarder_step')
