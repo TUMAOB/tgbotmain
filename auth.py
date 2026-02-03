@@ -2076,6 +2076,10 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
+    
+    elif action.startswith('settings_forwarders_'):
+        # Forward to forwarders_callback_handler
+        await forwarders_callback_handler(update, context)
 
 async def forwarders_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle forwarder settings callbacks"""
