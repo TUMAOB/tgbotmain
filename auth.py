@@ -2124,7 +2124,7 @@ async def forwarders_callback_handler(update: Update, context: ContextTypes.DEFA
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            f"📡 *{gateway_name} Forwarders*\\n\\nTotal: {len(forwarders)}\\n\\nSelect an option:",
+            f"📡 *{gateway_name} Forwarders*\n\nTotal: {len(forwarders)}\n\nSelect an option:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -2142,8 +2142,8 @@ async def forwarders_callback_handler(update: Update, context: ContextTypes.DEFA
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            f"➕ *Add {gateway_name} Forwarder*\\n\\n"
-            "Step 1/3: Enter a custom name for this forwarder\\n"
+            f"➕ *Add {gateway_name} Forwarder*\n\n"
+            "Step 1/3: Enter a custom name for this forwarder\n"
             "Example: My Channel",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -2184,10 +2184,10 @@ async def forwarders_callback_handler(update: Update, context: ContextTypes.DEFA
         masked_token = fwd['bot_token'][:10] + "..." + fwd['bot_token'][-5:] if len(fwd['bot_token']) > 15 else "***"
         
         await query.edit_message_text(
-            f"📡 *{gateway_name} Forwarder: {fwd['name']}*\\n\\n"
-            f"Status: {status}\\n"
-            f"Bot Token: `{masked_token}`\\n"
-            f"Chat ID: `{fwd['chat_id']}`\\n\\n"
+            f"📡 *{gateway_name} Forwarder: {fwd['name']}*\n\n"
+            f"Status: {status}\n"
+            f"Bot Token: `{masked_token}`\n"
+            f"Chat ID: `{fwd['chat_id']}`\n\n"
             "Select an option:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -2216,7 +2216,7 @@ async def forwarders_callback_handler(update: Update, context: ContextTypes.DEFA
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            f"✏️ *Edit {field_names[field]}*\\n\\n"
+            f"✏️ *Edit {field_names[field]}*\n\n"
             f"Enter the new {field_names[field].lower()}:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -2272,7 +2272,7 @@ async def forwarders_callback_handler(update: Update, context: ContextTypes.DEFA
         fwd = forwarders[idx]
         
         # Send test message
-        test_message = f"🧪 Test message from {gateway_name} Forwarder\\n\\nForwarder: {fwd['name']}\\nThis is a test to verify the configuration."
+        test_message = f"🧪 Test message from {gateway_name} Forwarder\n\nForwarder: {fwd['name']}\nThis is a test to verify the configuration."
         
         try:
             import aiohttp
@@ -3232,9 +3232,9 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
                 context.user_data['forwarder_step'] = 'token'
                 
                 await update.message.reply_text(
-                    f"➕ *Add {gateway_name} Forwarder*\\n\\n"
-                    f"Name: {message_text.strip()}\\n\\n"
-                    "Step 2/3: Enter the bot token\\n"
+                    f"➕ *Add {gateway_name} Forwarder*\n\n"
+                    f"Name: {message_text.strip()}\n\n"
+                    "Step 2/3: Enter the bot token\n"
                     "Example: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz",
                     parse_mode='Markdown'
                 )
@@ -3246,10 +3246,10 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
                 context.user_data['forwarder_step'] = 'chat_id'
                 
                 await update.message.reply_text(
-                    f"➕ *Add {gateway_name} Forwarder*\\n\\n"
-                    f"Name: {context.user_data['forwarder_name']}\\n"
-                    f"Token: {message_text.strip()[:10]}...\\n\\n"
-                    "Step 3/3: Enter the chat ID\\n"
+                    f"➕ *Add {gateway_name} Forwarder*\n\n"
+                    f"Name: {context.user_data['forwarder_name']}\n"
+                    f"Token: {message_text.strip()[:10]}...\n\n"
+                    "Step 3/3: Enter the chat ID\n"
                     "Example: -1001234567890 or @channelname",
                     parse_mode='Markdown'
                 )
@@ -3267,9 +3267,9 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
                 context.user_data.clear()
                 
                 await update.message.reply_text(
-                    f"✅ *Forwarder Added Successfully*\\n\\n"
-                    f"Name: {name}\\n"
-                    f"Gateway: {gateway_name}\\n"
+                    f"✅ *Forwarder Added Successfully*\n\n"
+                    f"Name: {name}\n"
+                    f"Gateway: {gateway_name}\n"
                     f"Chat ID: {chat_id}",
                     parse_mode='Markdown'
                 )
@@ -3293,8 +3293,8 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
             context.user_data.clear()
             
             await update.message.reply_text(
-                f"✅ *Forwarder Updated Successfully*\\n\\n"
-                f"Field: {field.title()}\\n"
+                f"✅ *Forwarder Updated Successfully*\n\n"
+                f"Field: {field.title()}\n"
                 f"New Value: {message_text.strip()}",
                 parse_mode='Markdown'
             )
