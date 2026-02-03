@@ -1,0 +1,2 @@
+# PayPal Pro Sites - Add your sites here (one per line)
+# Example: https://example.com/product-page/
