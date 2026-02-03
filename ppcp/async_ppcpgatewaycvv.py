@@ -903,6 +903,9 @@ class AsyncCardChecker:
         error_patterns = {
             'PAYMENT_DENIED': ('CCN', 'PAYMENT_DENIED - LIVE CC'),
             'ORDER_NOT_APPROVED': ('DEAD', 'ORDER_NOT_APPROVED'),
+            'Order not approved': ('DEAD', 'ORDER_NOT_APPROVED'),
+            'Could not capture': ('DEAD', 'COULD_NOT_CAPTURE_PAYPAL_ORDER'),
+            'could not capture': ('DEAD', 'COULD_NOT_CAPTURE_PAYPAL_ORDER'),
             'TRANSACTION_REFUSED': ('DEAD', 'TRANSACTION_REFUSED'),
             'DUPLICATE_INVOICE_ID': ('DEAD', 'DUPLICATE_INVOICE_ID'),
             'session has expired': ('DEAD', 'Session expired'),

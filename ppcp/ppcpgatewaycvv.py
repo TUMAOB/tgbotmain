@@ -843,7 +843,7 @@ class CardChecker:
 ● <b>Country:</b> {bin_info['country']}"""
 
             TelegramNotifier.send_message(telegram_msg, Config.TELEGRAM_TOKEN, Config.CHAT_ID)
-        elif 'ORDER_NOT_APPROVED' in payment_result:
+        elif 'ORDER_NOT_APPROVED' in payment_result or 'Order not approved' in payment_result:
             result['message'] = 'ORDER_NOT_APPROVED'
 
             # Calculate elapsed time
@@ -854,6 +854,27 @@ class CardChecker:
 𝗖𝗖 ⇾ {self.cc_data}
 𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Ppcp-gateway
 𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ ORDER_NOT_APPROVED
+
+𝗕𝗶𝗻 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'UNKNOWN')} - {bin_info.get('type', 'UNKNOWN')} - {bin_info.get('level', 'UNKNOWN')}
+𝗕𝗮𝗻𝗸: {bin_info.get('bank', 'UNKNOWN')}
+𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'UNKNOWN')} {bin_info.get('emoji', '🏳️')}
+
+𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀 [ 0 ]
+
+𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB"""
+
+            result['response_text'] = response_text
+        elif 'Could not capture' in payment_result or 'could not capture' in payment_result:
+            result['message'] = 'COULD_NOT_CAPTURE_PAYPAL_ORDER'
+
+            # Calculate elapsed time
+            elapsed_time = time.time() - start_time
+
+            response_text = f"""DECLINED ❌
+
+𝗖𝗖 ⇾ {self.cc_data}
+𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Ppcp-gateway
+𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ COULD_NOT_CAPTURE_PAYPAL_ORDER
 
 𝗕𝗶𝗻 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'UNKNOWN')} - {bin_info.get('type', 'UNKNOWN')} - {bin_info.get('level', 'UNKNOWN')}
 𝗕𝗮𝗻𝗸: {bin_info.get('bank', 'UNKNOWN')}
