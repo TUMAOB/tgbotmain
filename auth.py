@@ -69,6 +69,17 @@ user_rate_limit = {}
 user_rate_limit_lock = threading.Lock()
 RATE_LIMIT_SECONDS = 1  # Minimum seconds between checks per user (1 second as requested)
 
+# Active mass check tracking: user_id -> {'task': asyncio.Task, 'started': timestamp, 'total_cards': int}
+# This allows admin to use commands even when users are mass checking
+active_mass_checks = {}
+active_mass_checks_lock = threading.Lock()
+
+# Maximum concurrent mass checks per user (to prevent single user from blocking)
+MAX_CONCURRENT_MASS_CHECKS_PER_USER = 1
+
+# Maximum total concurrent mass checks (to prevent system overload)
+MAX_TOTAL_CONCURRENT_MASS_CHECKS = 5
+
 # REMOVED: Global variables for resource selection (now using per-request local variables)
 # This prevents conflicts when multiple users check cards simultaneously
 
@@ -202,6 +213,49 @@ def is_mod(user_id):
 def is_admin_or_mod(user_id):
     """Check if user is admin or mod"""
     return user_id == ADMIN_ID or is_mod(user_id)
+
+def get_active_mass_check_count():
+    """Get the total number of active mass checks"""
+    with active_mass_checks_lock:
+        return len(active_mass_checks)
+
+def get_user_mass_check_count(user_id):
+    """Get the number of active mass checks for a specific user"""
+    with active_mass_checks_lock:
+        return sum(1 for uid in active_mass_checks if uid == user_id)
+
+def register_mass_check(user_id, total_cards):
+    """Register a new mass check for a user"""
+    with active_mass_checks_lock:
+        active_mass_checks[user_id] = {
+            'started': time.time(),
+            'total_cards': total_cards
+        }
+
+def unregister_mass_check(user_id):
+    """Unregister a mass check when completed"""
+    with active_mass_checks_lock:
+        if user_id in active_mass_checks:
+            del active_mass_checks[user_id]
+
+def can_start_mass_check(user_id):
+    """Check if a user can start a new mass check"""
+    # Admin always can start mass checks
+    if user_id == ADMIN_ID:
+        return True, None
+    
+    with active_mass_checks_lock:
+        # Check user's concurrent mass checks
+        user_count = sum(1 for uid in active_mass_checks if uid == user_id)
+        if user_count >= MAX_CONCURRENT_MASS_CHECKS_PER_USER:
+            return False, "You already have a mass check in progress. Please wait for it to complete."
+        
+        # Check total concurrent mass checks (but allow admin to bypass)
+        total_count = len(active_mass_checks)
+        if total_count >= MAX_TOTAL_CONCURRENT_MASS_CHECKS:
+            return False, f"System is busy with {total_count} mass checks. Please try again later."
+    
+    return True, None
 
 def add_mod(user_id, added_by):
     """Add a user as mod"""
@@ -1139,6 +1193,32 @@ async def forward_to_channel(context: ContextTypes.DEFAULT_TYPE, card_details: s
         except Exception as e:
             print(f"❌ Error forwarding to forwarder '{forwarder['name']}': {str(e)}")
 
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /status command - show active mass checks (admin only)"""
+    user_id = update.effective_user.id
+    
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await update.message.reply_text("❌ This command is only available to admins and mods.")
+        return
+    
+    with active_mass_checks_lock:
+        if not active_mass_checks:
+            await update.message.reply_text("📊 No active mass checks currently running.")
+            return
+        
+        status_text = "📊 **Active Mass Checks:**\n\n"
+        for uid, info in active_mass_checks.items():
+            elapsed = time.time() - info['started']
+            status_text += f"• User ID: `{uid}`\n"
+            status_text += f"  Cards: {info['total_cards']}\n"
+            status_text += f"  Running: {elapsed:.1f}s\n\n"
+        
+        status_text += f"Total active: {len(active_mass_checks)}/{MAX_TOTAL_CONCURRENT_MASS_CHECKS}"
+        
+        await update.message.reply_text(status_text, parse_mode='Markdown')
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
     user_id = update.effective_user.id
@@ -1170,6 +1250,7 @@ Commands:
 /admin - Open admin control panel
 /approve <user_id> - Approve a user
 /remove <user_id> - Remove a user
+/status - View active mass checks
 """
     
     welcome_message += """
@@ -1302,7 +1383,7 @@ Checked by: @{update.effective_user.username or 'Unknown'} (ID: `{user_id}`)
             # Don't notify user about forwarding failure to avoid spam
 
 async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /b3s command for mass card checking"""
+    """Handle /b3s command for mass card checking - optimized to not block admin commands"""
     user_id = update.effective_user.id
     is_admin = user_id == ADMIN_ID
 
@@ -1365,81 +1446,99 @@ async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     total_cards = len(normalized_cards)
 
+    # Check if user can start a mass check (prevents single user from blocking system)
+    can_start, error_msg = can_start_mass_check(user_id)
+    if not can_start:
+        await update.message.reply_text(f"⏳ {error_msg}")
+        return
+
+    # Register this mass check
+    register_mass_check(user_id, total_cards)
+
     # Send initial status message
     status_msg = await update.message.reply_text(
         f"⏳ Checking {total_cards} card(s)...\n"
         f"Progress: 0/{total_cards}"
     )
 
-    # Process each card
-    approved_count = 0
-    declined_count = 0
-
-    for idx, card in enumerate(normalized_cards, 1):
-        # Rate limiting for non-admin users (between cards in mass check)
-        if not is_admin and idx > 1:
-            with user_rate_limit_lock:
-                current_time = time.time()
-                last_check_time = user_rate_limit.get(user_id, 0)
-                time_since_last_check = current_time - last_check_time
-
-                if time_since_last_check < RATE_LIMIT_SECONDS:
-                    wait_time = RATE_LIMIT_SECONDS - time_since_last_check
-                    await asyncio.sleep(wait_time)
-
-                # Update last check time
-                user_rate_limit[user_id] = time.time()
-
-        # Check the card
-        result, error_type, site_name = check_card(card)
-
-        # Count approved/declined
-        if "APPROVED" in result and "✅" in result:
-            approved_count += 1
-            # Forward to channel if approved
-            await forward_to_channel(context, card, result, gateway='b3')
-        else:
-            declined_count += 1
-
-        # Send result immediately after checking
-        card_result = f"Card {idx}/{total_cards}:\n{result}"
-        await update.message.reply_text(card_result)
-
-        # Update progress every card
-        try:
-            await status_msg.edit_text(
-                f"⏳ Checking {total_cards} card(s)...\n"
-                f"Progress: {idx}/{total_cards}\n"
-                f"✅ Approved: {approved_count} | ❌ Declined: {declined_count}"
-            )
-        except:
-            pass  # Ignore edit errors (e.g., message not modified)
-
-        # Handle error notifications
-        if error_type:
-            admin_message = f"⚠️ Site Error Detected!\n\nSite: {site_name}\nError Type: {error_type}\nChecked by: @{update.effective_user.username or 'Unknown'} (ID: {user_id})\n\nPlease fix the issue."
-            try:
-                await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message)
-            except Exception as e:
-                print(f"❌ Failed to send admin notification: {str(e)}")
-
-    # Send final summary
-    summary = f"📊 Mass Check Complete\n\n"
-    summary += f"Total Cards: {total_cards}\n"
-    summary += f"✅ Approved: {approved_count}\n"
-    summary += f"❌ Declined: {declined_count}"
-
-    await update.message.reply_text(summary)
-
-    # Delete the progress message
     try:
-        await status_msg.delete()
-    except:
-        pass
+        # Process each card with yielding to event loop
+        approved_count = 0
+        declined_count = 0
+
+        for idx, card in enumerate(normalized_cards, 1):
+            # Yield to event loop to allow other commands to process
+            # This is the key optimization - allows admin commands to run
+            await asyncio.sleep(0)  # Yield control to event loop
+            
+            # Rate limiting for non-admin users (between cards in mass check)
+            if not is_admin and idx > 1:
+                with user_rate_limit_lock:
+                    current_time = time.time()
+                    last_check_time = user_rate_limit.get(user_id, 0)
+                    time_since_last_check = current_time - last_check_time
+
+                    if time_since_last_check < RATE_LIMIT_SECONDS:
+                        wait_time = RATE_LIMIT_SECONDS - time_since_last_check
+                        await asyncio.sleep(wait_time)
+
+                    # Update last check time
+                    user_rate_limit[user_id] = time.time()
+
+            # Check the card using run_in_executor to not block event loop
+            loop = asyncio.get_event_loop()
+            result, error_type, site_name = await loop.run_in_executor(None, check_card, card)
+
+            # Count approved/declined
+            if "APPROVED" in result and "✅" in result:
+                approved_count += 1
+                # Forward to channel if approved
+                await forward_to_channel(context, card, result, gateway='b3')
+            else:
+                declined_count += 1
+
+            # Send result immediately after checking
+            card_result = f"Card {idx}/{total_cards}:\n{result}"
+            await update.message.reply_text(card_result)
+
+            # Update progress every card
+            try:
+                await status_msg.edit_text(
+                    f"⏳ Checking {total_cards} card(s)...\n"
+                    f"Progress: {idx}/{total_cards}\n"
+                    f"✅ Approved: {approved_count} | ❌ Declined: {declined_count}"
+                )
+            except:
+                pass  # Ignore edit errors (e.g., message not modified)
+
+            # Handle error notifications
+            if error_type:
+                admin_message = f"⚠️ Site Error Detected!\n\nSite: {site_name}\nError Type: {error_type}\nChecked by: @{update.effective_user.username or 'Unknown'} (ID: {user_id})\n\nPlease fix the issue."
+                try:
+                    await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message)
+                except Exception as e:
+                    print(f"❌ Failed to send admin notification: {str(e)}")
+
+        # Send final summary
+        summary = f"📊 Mass Check Complete\n\n"
+        summary += f"Total Cards: {total_cards}\n"
+        summary += f"✅ Approved: {approved_count}\n"
+        summary += f"❌ Declined: {declined_count}"
+
+        await update.message.reply_text(summary)
+
+        # Delete the progress message
+        try:
+            await status_msg.delete()
+        except:
+            pass
+    finally:
+        # Always unregister the mass check when done
+        unregister_mass_check(user_id)
 
 
 async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /pp command for ppcp gateway checking with rate limiting and mass checking support"""
+    """Handle /pp command for ppcp gateway checking with rate limiting and mass checking support - optimized to not block admin commands"""
     user_id = update.effective_user.id
     is_admin = user_id == ADMIN_ID
 
@@ -1553,88 +1652,104 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     else:
         # Mass checking with STREAMING results - each result sent immediately as it completes
+        # Check if user can start a mass check (prevents single user from blocking system)
+        can_start, error_msg = can_start_mass_check(user_id)
+        if not can_start:
+            await update.message.reply_text(f"⏳ {error_msg}")
+            return
+
+        # Register this mass check
+        register_mass_check(user_id, total_cards)
+
         # Send initial status message
         status_msg = await update.message.reply_text(
             f"⏳ Checking {total_cards} card(s)...\n"
             f"Progress: 0/{total_cards}"
         )
 
-        # Load sites from sites.txt file
-        sites = []
-        if os.path.exists('ppcp/sites.txt'):
-            with open('ppcp/sites.txt', 'r') as f:
-                sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-        else:
-            # Load from the project root if ppcp folder is not present in the path
-            if os.path.exists('sites.txt'):
-                with open('sites.txt', 'r') as f:
-                    sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-
-        if not sites:
-            await status_msg.edit_text("❌ No sites found!")
-            return
-
-        # Track progress for streaming results
-        approved_count = 0
-        declined_count = 0
-        completed_count = 0
-        
-        # Define callback to send each result IMMEDIATELY as it completes
-        async def on_card_result(index, card, result):
-            nonlocal approved_count, declined_count, completed_count
-            
-            completed_count += 1
-            
-            # Count approved/declined
-            if ("CCN" in result and "✅" in result) or ("CVV" in result and "✅" in result):
-                approved_count += 1
-                # Forward to channel if approved
-                await forward_to_channel(context, card, result, gateway='pp')
-            else:
-                declined_count += 1
-
-            # Send result IMMEDIATELY
-            card_result = f"Card {completed_count}/{total_cards}:\n{result}"
-            await update.message.reply_text(card_result)
-
-            # Update progress
-            try:
-                await status_msg.edit_text(
-                    f"⏳ Checking {total_cards} card(s)...\n"
-                    f"Progress: {completed_count}/{total_cards}\n"
-                    f"✅ Approved: {approved_count} | ❌ Declined: {declined_count}"
-                )
-            except:
-                pass  # Ignore edit errors
-
-        # Check all cards with STREAMING results (10 concurrent)
-        summary = await check_ppcp_cards_streaming(
-            normalized_cards, 
-            sites, 
-            on_card_result, 
-            max_concurrent=10
-        )
-
-        # Send final summary
-        final_summary = f"📊 Mass Check Complete\n\n"
-        final_summary += f"Total Cards: {total_cards}\n"
-        final_summary += f"✅ Approved: {summary.get('approved', approved_count)}\n"
-        final_summary += f"❌ Declined: {summary.get('declined', declined_count)}"
-        
-        if summary.get('errors', 0) > 0:
-            final_summary += f"\n⚠️ Errors: {summary.get('errors', 0)}"
-
-        await update.message.reply_text(final_summary)
-
-        # Delete the progress message
         try:
-            await status_msg.delete()
-        except:
-            pass
+            # Load sites from sites.txt file
+            sites = []
+            if os.path.exists('ppcp/sites.txt'):
+                with open('ppcp/sites.txt', 'r') as f:
+                    sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+            else:
+                # Load from the project root if ppcp folder is not present in the path
+                if os.path.exists('sites.txt'):
+                    with open('sites.txt', 'r') as f:
+                        sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+
+            if not sites:
+                await status_msg.edit_text("❌ No sites found!")
+                return
+
+            # Track progress for streaming results
+            approved_count = 0
+            declined_count = 0
+            completed_count = 0
+            
+            # Define callback to send each result IMMEDIATELY as it completes
+            async def on_card_result(index, card, result):
+                nonlocal approved_count, declined_count, completed_count
+                
+                # Yield to event loop to allow other commands to process
+                await asyncio.sleep(0)
+                
+                completed_count += 1
+                
+                # Count approved/declined
+                if ("CCN" in result and "✅" in result) or ("CVV" in result and "✅" in result):
+                    approved_count += 1
+                    # Forward to channel if approved
+                    await forward_to_channel(context, card, result, gateway='pp')
+                else:
+                    declined_count += 1
+
+                # Send result IMMEDIATELY
+                card_result = f"Card {completed_count}/{total_cards}:\n{result}"
+                await update.message.reply_text(card_result)
+
+                # Update progress
+                try:
+                    await status_msg.edit_text(
+                        f"⏳ Checking {total_cards} card(s)...\n"
+                        f"Progress: {completed_count}/{total_cards}\n"
+                        f"✅ Approved: {approved_count} | ❌ Declined: {declined_count}"
+                    )
+                except:
+                    pass  # Ignore edit errors
+
+            # Check all cards with STREAMING results (10 concurrent)
+            summary = await check_ppcp_cards_streaming(
+                normalized_cards, 
+                sites, 
+                on_card_result, 
+                max_concurrent=10
+            )
+
+            # Send final summary
+            final_summary = f"📊 Mass Check Complete\n\n"
+            final_summary += f"Total Cards: {total_cards}\n"
+            final_summary += f"✅ Approved: {summary.get('approved', approved_count)}\n"
+            final_summary += f"❌ Declined: {summary.get('declined', declined_count)}"
+            
+            if summary.get('errors', 0) > 0:
+                final_summary += f"\n⚠️ Errors: {summary.get('errors', 0)}"
+
+            await update.message.reply_text(final_summary)
+
+            # Delete the progress message
+            try:
+                await status_msg.delete()
+            except:
+                pass
+        finally:
+            # Always unregister the mass check when done
+            unregister_mass_check(user_id)
 
 
 async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /pro command for PayPal Pro gateway checking with rate limiting and mass checking support"""
+    """Handle /pro command for PayPal Pro gateway checking with rate limiting and mass checking support - optimized to not block admin commands"""
     user_id = update.effective_user.id
     is_admin = user_id == ADMIN_ID
 
@@ -1728,8 +1843,9 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         checking_msg = await update.message.reply_text("⏳ Checking Please Wait... (PayPal Pro)")
 
         try:
-            # Check the single card using PayPal Pro gateway
-            result = paypalpro.check_card(normalized_cards[0], sites=sites)
+            # Check the single card using PayPal Pro gateway (run in executor to not block)
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, lambda: paypalpro.check_card(normalized_cards[0], sites=sites))
             formatted_result = paypalpro.format_result(result)
 
             # Edit the message with the result
@@ -1746,75 +1862,92 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     else:
         # Mass checking
+        # Check if user can start a mass check (prevents single user from blocking system)
+        can_start, error_msg = can_start_mass_check(user_id)
+        if not can_start:
+            await update.message.reply_text(f"⏳ {error_msg}")
+            return
+
+        # Register this mass check
+        register_mass_check(user_id, total_cards)
+
         # Send initial status message
         status_msg = await update.message.reply_text(
             f"⏳ Checking {total_cards} card(s) via PayPal Pro...\n"
             f"Progress: 0/{total_cards}"
         )
 
-        # Track progress
-        approved_count = 0
-        declined_count = 0
-
-        for idx, card in enumerate(normalized_cards, 1):
-            # Rate limiting for non-admin users (between cards in mass check)
-            if not is_admin and idx > 1:
-                with user_rate_limit_lock:
-                    current_time = time.time()
-                    last_check_time = user_rate_limit.get(user_id, 0)
-                    time_since_last_check = current_time - last_check_time
-
-                    if time_since_last_check < RATE_LIMIT_SECONDS:
-                        wait_time = RATE_LIMIT_SECONDS - time_since_last_check
-                        await asyncio.sleep(wait_time)
-
-                    # Update last check time
-                    user_rate_limit[user_id] = time.time()
-
-            try:
-                # Check the card
-                result = paypalpro.check_card(card, sites=sites)
-                formatted_result = paypalpro.format_result(result)
-
-                # Count approved/declined
-                if result.get('approved', False):
-                    approved_count += 1
-                    # Forward to channel if approved
-                    await forward_to_channel(context, card, formatted_result, gateway='pp')
-                else:
-                    declined_count += 1
-
-                # Send result immediately after checking
-                card_result = f"Card {idx}/{total_cards}:\n{formatted_result}"
-                await update.message.reply_text(card_result)
-
-            except Exception as e:
-                declined_count += 1
-                await update.message.reply_text(f"Card {idx}/{total_cards}:\n❌ Error: {str(e)}")
-
-            # Update progress
-            try:
-                await status_msg.edit_text(
-                    f"⏳ Checking {total_cards} card(s) via PayPal Pro...\n"
-                    f"Progress: {idx}/{total_cards}\n"
-                    f"✅ Approved: {approved_count} | ❌ Declined: {declined_count}"
-                )
-            except:
-                pass  # Ignore edit errors
-
-        # Send final summary
-        summary = f"📊 PayPal Pro Mass Check Complete\n\n"
-        summary += f"Total Cards: {total_cards}\n"
-        summary += f"✅ Approved: {approved_count}\n"
-        summary += f"❌ Declined: {declined_count}"
-
-        await update.message.reply_text(summary)
-
-        # Delete the progress message
         try:
-            await status_msg.delete()
-        except:
-            pass
+            # Track progress
+            approved_count = 0
+            declined_count = 0
+
+            for idx, card in enumerate(normalized_cards, 1):
+                # Yield to event loop to allow other commands to process
+                await asyncio.sleep(0)
+                
+                # Rate limiting for non-admin users (between cards in mass check)
+                if not is_admin and idx > 1:
+                    with user_rate_limit_lock:
+                        current_time = time.time()
+                        last_check_time = user_rate_limit.get(user_id, 0)
+                        time_since_last_check = current_time - last_check_time
+
+                        if time_since_last_check < RATE_LIMIT_SECONDS:
+                            wait_time = RATE_LIMIT_SECONDS - time_since_last_check
+                            await asyncio.sleep(wait_time)
+
+                        # Update last check time
+                        user_rate_limit[user_id] = time.time()
+
+                try:
+                    # Check the card using run_in_executor to not block event loop
+                    loop = asyncio.get_event_loop()
+                    result = await loop.run_in_executor(None, lambda c=card: paypalpro.check_card(c, sites=sites))
+                    formatted_result = paypalpro.format_result(result)
+
+                    # Count approved/declined
+                    if result.get('approved', False):
+                        approved_count += 1
+                        # Forward to channel if approved
+                        await forward_to_channel(context, card, formatted_result, gateway='pp')
+                    else:
+                        declined_count += 1
+
+                    # Send result immediately after checking
+                    card_result = f"Card {idx}/{total_cards}:\n{formatted_result}"
+                    await update.message.reply_text(card_result)
+
+                except Exception as e:
+                    declined_count += 1
+                    await update.message.reply_text(f"Card {idx}/{total_cards}:\n❌ Error: {str(e)}")
+
+                # Update progress
+                try:
+                    await status_msg.edit_text(
+                        f"⏳ Checking {total_cards} card(s) via PayPal Pro...\n"
+                        f"Progress: {idx}/{total_cards}\n"
+                        f"✅ Approved: {approved_count} | ❌ Declined: {declined_count}"
+                    )
+                except:
+                    pass  # Ignore edit errors
+
+            # Send final summary
+            summary = f"📊 PayPal Pro Mass Check Complete\n\n"
+            summary += f"Total Cards: {total_cards}\n"
+            summary += f"✅ Approved: {approved_count}\n"
+            summary += f"❌ Declined: {declined_count}"
+
+            await update.message.reply_text(summary)
+
+            # Delete the progress message
+            try:
+                await status_msg.delete()
+            except:
+                pass
+        finally:
+            # Always unregister the mass check when done
+            unregister_mass_check(user_id)
 
 
 async def admin_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3798,6 +3931,7 @@ def main():
     application.add_handler(CommandHandler("approve", approve_command))
     application.add_handler(CommandHandler("admin", admin_menu_command))
     application.add_handler(CommandHandler("remove", remove_user_command))
+    application.add_handler(CommandHandler("status", status_command))
     
     # Add callback query handlers (must be before generic handlers)
     application.add_handler(CallbackQueryHandler(duration_callback, pattern=r'^duration_'))
