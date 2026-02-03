@@ -38,6 +38,10 @@ MODS_DB_LOCK_FILE = 'mods_db.json.lock'
 AUTO_SCAN_SETTINGS_FILE = 'auto_scan_settings.json'
 AUTO_SCAN_SETTINGS_LOCK_FILE = 'auto_scan_settings.json.lock'
 
+# PPCP auto-remove settings file
+PPCP_AUTO_REMOVE_SETTINGS_FILE = 'ppcp_auto_remove_settings.json'
+PPCP_AUTO_REMOVE_SETTINGS_LOCK_FILE = 'ppcp_auto_remove_settings.json.lock'
+
 # Forward channel ID (set to None to disable forwarding, or use channel username like '@yourchannel' or channel ID like -1001234567890)
 FORWARD_CHANNEL_ID = -1003865829143  # Replace with your channel ID or username
 
@@ -240,6 +244,25 @@ def save_auto_scan_settings(settings):
     lock = SoftFileLock(AUTO_SCAN_SETTINGS_LOCK_FILE, timeout=10)
     with lock:
         with open(AUTO_SCAN_SETTINGS_FILE, 'w') as f:
+            json.dump(settings, f, indent=2)
+
+def load_ppcp_auto_remove_settings():
+    """Load PPCP auto-remove settings from file"""
+    lock = SoftFileLock(PPCP_AUTO_REMOVE_SETTINGS_LOCK_FILE, timeout=10)
+    with lock:
+        if os.path.exists(PPCP_AUTO_REMOVE_SETTINGS_FILE):
+            try:
+                with open(PPCP_AUTO_REMOVE_SETTINGS_FILE, 'r') as f:
+                    return json.load(f)
+            except:
+                return {'enabled': True}  # Default to enabled for backward compatibility
+        return {'enabled': True}  # Default to enabled for backward compatibility
+
+def save_ppcp_auto_remove_settings(settings):
+    """Save PPCP auto-remove settings to file"""
+    lock = SoftFileLock(PPCP_AUTO_REMOVE_SETTINGS_LOCK_FILE, timeout=10)
+    with lock:
+        with open(PPCP_AUTO_REMOVE_SETTINGS_FILE, 'w') as f:
             json.dump(settings, f, indent=2)
 
 def load_ppcp_sites():
@@ -2001,6 +2024,10 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
     elif action == 'settings_ppcp_sites':
         # Show PPCP sites management
         sites = load_ppcp_sites()
+        auto_remove_settings = load_ppcp_auto_remove_settings()
+        auto_remove_enabled = auto_remove_settings.get('enabled', True)
+        
+        auto_remove_status = "🟢 ON" if auto_remove_enabled else "🔴 OFF"
         
         keyboard = [
             [InlineKeyboardButton("➕ Add Site", callback_data='ppcp_add_site')],
@@ -2010,11 +2037,12 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
             keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='ppcp_view_sites')])
             keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='ppcp_remove_site')])
         
+        keyboard.append([InlineKeyboardButton(f"🗑️ Auto-Remove Bad Sites: {auto_remove_status}", callback_data='ppcp_toggle_auto_remove')])
         keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            f"🔗 *PPCP Sites*\n\nTotal sites: {len(sites)}\n\nSelect an option:",
+            f"🔗 *PPCP Sites*\n\nTotal sites: {len(sites)}\nAuto-Remove Bad Sites: {auto_remove_status}\n\nSelect an option:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -2834,22 +2862,56 @@ async def ppcp_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             
             # Redirect back to PPCP sites menu
             sites = load_ppcp_sites()
+            auto_remove_settings = load_ppcp_auto_remove_settings()
+            auto_remove_enabled = auto_remove_settings.get('enabled', True)
+            auto_remove_status = "🟢 ON" if auto_remove_enabled else "🔴 OFF"
+            
             keyboard = [
                 [InlineKeyboardButton("➕ Add Site", callback_data='ppcp_add_site')],
             ]
             if sites:
                 keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='ppcp_view_sites')])
                 keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='ppcp_remove_site')])
+            keyboard.append([InlineKeyboardButton(f"🗑️ Auto-Remove Bad Sites: {auto_remove_status}", callback_data='ppcp_toggle_auto_remove')])
             keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await query.edit_message_text(
-                f"🔗 *PPCP Sites*\n\nTotal sites: {len(sites)}\n\nSelect an option:",
+                f"🔗 *PPCP Sites*\n\nTotal sites: {len(sites)}\nAuto-Remove Bad Sites: {auto_remove_status}\n\nSelect an option:",
                 reply_markup=reply_markup,
                 parse_mode='Markdown'
             )
         else:
             await query.edit_message_text("❌ Invalid site index.")
+    
+    elif action == 'ppcp_toggle_auto_remove':
+        # Toggle PPCP auto-remove setting
+        settings = load_ppcp_auto_remove_settings()
+        settings['enabled'] = not settings.get('enabled', True)
+        save_ppcp_auto_remove_settings(settings)
+        
+        # Redirect back to PPCP sites menu with updated status
+        sites = load_ppcp_sites()
+        auto_remove_enabled = settings.get('enabled', True)
+        auto_remove_status = "🟢 ON" if auto_remove_enabled else "🔴 OFF"
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Add Site", callback_data='ppcp_add_site')],
+        ]
+        
+        if sites:
+            keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='ppcp_view_sites')])
+            keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='ppcp_remove_site')])
+        
+        keyboard.append([InlineKeyboardButton(f"🗑️ Auto-Remove Bad Sites: {auto_remove_status}", callback_data='ppcp_toggle_auto_remove')])
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"🔗 *PPCP Sites*\n\nTotal sites: {len(sites)}\nAuto-Remove Bad Sites: {auto_remove_status}\n\nSelect an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
     
     elif action == 'ppcp_cancel':
         # Cancel pending action
@@ -2859,17 +2921,22 @@ async def ppcp_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         
         # Redirect back to PPCP sites menu
         sites = load_ppcp_sites()
+        auto_remove_settings = load_ppcp_auto_remove_settings()
+        auto_remove_enabled = auto_remove_settings.get('enabled', True)
+        auto_remove_status = "🟢 ON" if auto_remove_enabled else "🔴 OFF"
+        
         keyboard = [
             [InlineKeyboardButton("➕ Add Site", callback_data='ppcp_add_site')],
         ]
         if sites:
             keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='ppcp_view_sites')])
             keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='ppcp_remove_site')])
+        keyboard.append([InlineKeyboardButton(f"🗑️ Auto-Remove Bad Sites: {auto_remove_status}", callback_data='ppcp_toggle_auto_remove')])
         keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            f"🔗 *PPCP Sites*\n\nTotal sites: {len(sites)}\n\nSelect an option:",
+            f"🔗 *PPCP Sites*\n\nTotal sites: {len(sites)}\nAuto-Remove Bad Sites: {auto_remove_status}\n\nSelect an option:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
