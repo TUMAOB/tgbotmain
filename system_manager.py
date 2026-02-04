@@ -183,6 +183,18 @@ def create_backup(backup_type: str = 'full', description: str = '') -> Tuple[boo
         with open(os.path.join(backup_path, 'backup_metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
         
+        # Create ZIP file for easy download/restore
+        try:
+            zip_path = os.path.join(BACKUP_DIR, f'{backup_name}.zip')
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(backup_path):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, backup_path)
+                        zipf.write(file_path, arcname)
+        except:
+            pass  # ZIP creation is optional, don't fail the backup
+        
         return True, f"Backup created successfully with {len(backed_up_items)} items", backup_name
         
     except Exception as e:
@@ -279,17 +291,21 @@ def delete_backup(backup_name: str) -> Tuple[bool, str]:
         return False, f"Failed to delete backup: {str(e)}"
 
 
-def download_github_repo(repo_url: str) -> Tuple[bool, str, str]:
+def download_github_repo(repo_url: str, progress_callback=None) -> Tuple[bool, str, str]:
     """
     Download a GitHub repository as a ZIP file.
     
     Args:
         repo_url: GitHub repository URL (e.g., https://github.com/user/repo)
+        progress_callback: Optional callback function(stage, percent, message) for progress updates
         
     Returns:
         Tuple of (success, message, temp_dir_path)
     """
     try:
+        if progress_callback:
+            progress_callback('download', 0, 'Preparing download...')
+        
         # Parse GitHub URL to get the ZIP download URL
         # Support formats:
         # - https://github.com/user/repo
@@ -312,6 +328,9 @@ def download_github_repo(repo_url: str) -> Tuple[bool, str, str]:
         # Construct ZIP download URL
         zip_url = f"{repo_url}/archive/refs/heads/{branch}.zip"
         
+        if progress_callback:
+            progress_callback('download', 10, f'Connecting to GitHub (branch: {branch})...')
+        
         # Try main branch first, then master
         response = requests.get(zip_url, timeout=60, stream=True)
         
@@ -319,6 +338,8 @@ def download_github_repo(repo_url: str) -> Tuple[bool, str, str]:
             # Try master branch
             branch = 'master'
             zip_url = f"{repo_url}/archive/refs/heads/{branch}.zip"
+            if progress_callback:
+                progress_callback('download', 15, f'Trying master branch...')
             response = requests.get(zip_url, timeout=60, stream=True)
         
         if response.status_code != 200:
@@ -328,15 +349,32 @@ def download_github_repo(repo_url: str) -> Tuple[bool, str, str]:
         temp_dir = tempfile.mkdtemp(prefix='github_update_')
         zip_path = os.path.join(temp_dir, 'repo.zip')
         
-        # Save ZIP file
+        # Get total file size if available
+        total_size = int(response.headers.get('content-length', 0))
+        
+        if progress_callback:
+            progress_callback('download', 20, 'Downloading repository...')
+        
+        # Save ZIP file with progress tracking
+        downloaded = 0
         with open(zip_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
+                downloaded += len(chunk)
+                if progress_callback and total_size > 0:
+                    percent = 20 + int((downloaded / total_size) * 30)  # 20-50%
+                    progress_callback('download', percent, f'Downloading... {downloaded // 1024} KB')
+        
+        if progress_callback:
+            progress_callback('extract', 50, 'Extracting repository...')
         
         # Extract ZIP
         extract_dir = os.path.join(temp_dir, 'extracted')
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(extract_dir)
+        
+        if progress_callback:
+            progress_callback('extract', 70, 'Locating source files...')
         
         # Find the extracted folder (usually repo-branch)
         extracted_items = os.listdir(extract_dir)
@@ -344,6 +382,9 @@ def download_github_repo(repo_url: str) -> Tuple[bool, str, str]:
             source_dir = os.path.join(extract_dir, extracted_items[0])
         else:
             source_dir = extract_dir
+        
+        if progress_callback:
+            progress_callback('extract', 80, 'Repository ready for update')
         
         return True, f"Repository downloaded successfully (branch: {branch})", source_dir
         
@@ -392,13 +433,14 @@ def extract_zip_file(zip_path: str) -> Tuple[bool, str, str]:
         return False, f"Error extracting ZIP: {str(e)}", ''
 
 
-def apply_system_update(source_dir: str, create_backup: bool = True) -> Tuple[bool, str, List[str]]:
+def apply_system_update(source_dir: str, create_backup: bool = True, progress_callback=None) -> Tuple[bool, str, List[str]]:
     """
     Apply a system update from a source directory.
     
     Args:
         source_dir: Path to the directory containing the update files
         create_backup: Whether to create a backup before updating
+        progress_callback: Optional callback function(stage, percent, message) for progress updates
         
     Returns:
         Tuple of (success, message, list of updated files)
@@ -408,18 +450,35 @@ def apply_system_update(source_dir: str, create_backup: bool = True) -> Tuple[bo
     try:
         # Create backup before updating
         if create_backup:
+            if progress_callback:
+                progress_callback('backup', 0, 'Creating pre-update backup...')
             backup_success, backup_msg, backup_name = create_backup_func('full', 'Pre-update backup')
             if not backup_success:
                 return False, f"Failed to create backup: {backup_msg}", []
+            if progress_callback:
+                progress_callback('backup', 20, f'Backup created: {backup_name}')
+        
+        total_items = len(SYSTEM_FILES) + len(CORE_MODULES) + 2  # +2 for additional files scan
+        current_item = 0
         
         # Update system files
+        if progress_callback:
+            progress_callback('update', 25, 'Updating system files...')
+        
         for sys_file in SYSTEM_FILES:
             src = os.path.join(source_dir, sys_file)
             if os.path.exists(src):
                 shutil.copy2(src, sys_file)
                 updated_files.append(sys_file)
+                current_item += 1
+                if progress_callback:
+                    percent = 25 + int((current_item / total_items) * 40)
+                    progress_callback('update', percent, f'Updated: {sys_file}')
         
         # Update core modules
+        if progress_callback:
+            progress_callback('update', 50, 'Updating core modules...')
+        
         for module_dir in CORE_MODULES:
             src_dir = os.path.join(source_dir, module_dir)
             if os.path.exists(src_dir) and os.path.isdir(src_dir):
@@ -429,14 +488,23 @@ def apply_system_update(source_dir: str, create_backup: bool = True) -> Tuple[bo
                 # Copy new module directory
                 shutil.copytree(src_dir, module_dir)
                 updated_files.append(f'{module_dir}/')
+                current_item += 1
+                if progress_callback:
+                    percent = 25 + int((current_item / total_items) * 40)
+                    progress_callback('update', percent, f'Updated module: {module_dir}/')
         
         # Check for any additional Python files in root
+        if progress_callback:
+            progress_callback('update', 70, 'Checking for additional files...')
+        
         for item in os.listdir(source_dir):
             if item.endswith('.py') and item not in SYSTEM_FILES:
                 src = os.path.join(source_dir, item)
                 if os.path.isfile(src):
                     shutil.copy2(src, item)
                     updated_files.append(item)
+                    if progress_callback:
+                        progress_callback('update', 75, f'Updated: {item}')
         
         # Update requirements.txt if present
         req_src = os.path.join(source_dir, 'requirements.txt')
@@ -444,6 +512,9 @@ def apply_system_update(source_dir: str, create_backup: bool = True) -> Tuple[bo
             shutil.copy2(req_src, 'requirements.txt')
             if 'requirements.txt' not in updated_files:
                 updated_files.append('requirements.txt')
+        
+        if progress_callback:
+            progress_callback('complete', 90, f'Updated {len(updated_files)} files successfully')
         
         return True, f"System updated successfully. {len(updated_files)} files updated.", updated_files
         
@@ -498,6 +569,138 @@ def cleanup_temp_dir(temp_dir: str):
                 shutil.rmtree(temp_dir)
     except:
         pass
+
+
+def create_restart_script() -> Tuple[bool, str, str]:
+    """
+    Create a restart script for the bot.
+    
+    Returns:
+        Tuple of (success, message, script_path)
+    """
+    try:
+        script_path = 'restart_bot.sh'
+        
+        # Create bash script for Linux/Unix
+        script_content = """#!/bin/bash
+# Auto-generated restart script for Telegram Bot
+
+echo "🔄 Restarting Telegram Bot..."
+echo ""
+
+# Find the bot process
+BOT_PID=$(pgrep -f "python.*run_production.py" || pgrep -f "python.*auth.py")
+
+if [ -n "$BOT_PID" ]; then
+    echo "⏹️  Stopping bot (PID: $BOT_PID)..."
+    kill $BOT_PID
+    
+    # Wait for process to stop (max 10 seconds)
+    for i in {1..10}; do
+        if ! ps -p $BOT_PID > /dev/null 2>&1; then
+            echo "✅ Bot stopped successfully"
+            break
+        fi
+        echo "   Waiting for bot to stop... ($i/10)"
+        sleep 1
+    done
+    
+    # Force kill if still running
+    if ps -p $BOT_PID > /dev/null 2>&1; then
+        echo "⚠️  Force stopping bot..."
+        kill -9 $BOT_PID
+        sleep 1
+    fi
+else
+    echo "ℹ️  Bot is not currently running"
+fi
+
+echo ""
+echo "🚀 Starting bot..."
+sleep 2
+
+# Start the bot in background
+nohup python3 run_production.py > bot.log 2>&1 &
+NEW_PID=$!
+
+echo "✅ Bot started with PID: $NEW_PID"
+echo ""
+echo "📋 To view logs: tail -f bot.log"
+echo "📋 To stop bot: kill $NEW_PID"
+echo ""
+echo "✨ Restart complete!"
+"""
+        
+        with open(script_path, 'w') as f:
+            f.write(script_content)
+        
+        # Make script executable
+        os.chmod(script_path, 0o755)
+        
+        return True, "Restart script created successfully", script_path
+        
+    except Exception as e:
+        return False, f"Failed to create restart script: {str(e)}", ''
+
+
+def create_backup_zip(backup_name: str) -> Tuple[bool, str, str]:
+    """
+    Create a ZIP file from a backup directory.
+    
+    Args:
+        backup_name: Name of the backup to compress
+        
+    Returns:
+        Tuple of (success, message, zip_path)
+    """
+    backup_path = os.path.join(BACKUP_DIR, backup_name)
+    
+    if not os.path.exists(backup_path):
+        return False, f"Backup '{backup_name}' not found", ''
+    
+    try:
+        zip_path = os.path.join(BACKUP_DIR, f'{backup_name}.zip')
+        
+        # Create ZIP file
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(backup_path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, backup_path)
+                    zipf.write(file_path, arcname)
+        
+        # Get ZIP file size
+        zip_size_mb = round(os.path.getsize(zip_path) / (1024 * 1024), 2)
+        
+        return True, f"Backup ZIP created ({zip_size_mb} MB)", zip_path
+        
+    except Exception as e:
+        return False, f"Failed to create ZIP: {str(e)}", ''
+
+
+def get_backup_zip_path(backup_name: str) -> Optional[str]:
+    """
+    Get the path to a backup ZIP file, creating it if necessary.
+    
+    Args:
+        backup_name: Name of the backup
+        
+    Returns:
+        Path to ZIP file or None if failed
+    """
+    zip_path = os.path.join(BACKUP_DIR, f'{backup_name}.zip')
+    
+    # If ZIP already exists, return it
+    if os.path.exists(zip_path):
+        return zip_path
+    
+    # Create ZIP from backup directory
+    success, message, created_zip_path = create_backup_zip(backup_name)
+    
+    if success:
+        return created_zip_path
+    
+    return None
 
 
 def get_system_info() -> Dict:
