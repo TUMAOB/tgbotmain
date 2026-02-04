@@ -47,6 +47,31 @@ except ImportError:
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Import subprocess for auto-restart functionality
+import subprocess
+
+def auto_restart_bot():
+    """
+    Automatically restart the bot by spawning a new process and exiting the current one.
+    This function does not return - it exits the current process after starting the new one.
+    """
+    import sys
+    import os
+    
+    # Get the current script path
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'run_production.py')
+    
+    # Start the new bot process in background
+    subprocess.Popen(
+        [sys.executable, script_path],
+        stdout=open('bot.log', 'a'),
+        stderr=subprocess.STDOUT,
+        start_new_session=True
+    )
+    
+    # Exit the current process
+    os._exit(0)
+
 # Admin user ID
 ADMIN_ID = 7405188060
 
@@ -5645,26 +5670,16 @@ async def system_message_handler(update: Update, context: ContextTypes.DEFAULT_T
             if len(updated_files) > 10:
                 files_list += f"\n... and {len(updated_files) - 10} more"
             
-            # Create restart script
-            script_success, script_msg, script_path = system_manager.create_restart_script()
-            
-            restart_instructions = ""
-            if script_success:
-                restart_instructions = (
-                    f"\n\n🔄 *Restart Options:*\n"
-                    f"1. Run: `bash {script_path}`\n"
-                    f"2. Or manually: `python3 run_production.py`"
-                )
-            else:
-                restart_instructions = "\n\n⚠️ Please restart manually: `python3 run_production.py`"
-            
             await status_msg.edit_text(
                 f"✅ *System Updated Successfully*\n\n"
                 f"📦 Updated {len(updated_files)} files:\n{files_list}\n\n"
-                f"⚠️ *Important:* Please restart the bot for changes to take effect."
-                f"{restart_instructions}",
+                f"🔄 *Restarting bot automatically...*",
                 parse_mode='Markdown'
             )
+            
+            # Auto-restart the bot
+            await asyncio.sleep(1)  # Brief delay to ensure message is sent
+            auto_restart_bot()
         else:
             await status_msg.edit_text(
                 f"❌ *Update Failed*\n\n{message}\n\n"
@@ -5773,26 +5788,16 @@ async def system_document_handler(update: Update, context: ContextTypes.DEFAULT_
             if len(updated_files) > 10:
                 files_list += f"\n... and {len(updated_files) - 10} more"
             
-            # Create restart script
-            script_success, script_msg, script_path = system_manager.create_restart_script()
-            
-            restart_instructions = ""
-            if script_success:
-                restart_instructions = (
-                    f"\n\n🔄 *Restart Options:*\n"
-                    f"1. Run: `bash {script_path}`\n"
-                    f"2. Or manually: `python3 run_production.py`"
-                )
-            else:
-                restart_instructions = "\n\n⚠️ Please restart manually: `python3 run_production.py`"
-            
             await status_msg.edit_text(
                 f"✅ *System Updated Successfully*\n\n"
                 f"📦 Updated {len(updated_files)} files:\n{files_list}\n\n"
-                f"⚠️ *Important:* Please restart the bot for changes to take effect."
-                f"{restart_instructions}",
+                f"🔄 *Restarting bot automatically...*",
                 parse_mode='Markdown'
             )
+            
+            # Auto-restart the bot
+            await asyncio.sleep(1)  # Brief delay to ensure message is sent
+            auto_restart_bot()
         else:
             await status_msg.edit_text(
                 f"❌ *Update Failed*\n\n{message}\n\n"
