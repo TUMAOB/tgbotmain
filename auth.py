@@ -637,7 +637,7 @@ def is_user_approved(user_id):
     
     return True
 
-def approve_user(user_id, duration_type):
+def approve_user(user_id, duration_type, username=None):
     """Approve a user with specified duration"""
     db = load_user_db()
     user_id_str = str(user_id)
@@ -660,6 +660,7 @@ def approve_user(user_id, duration_type):
     
     db[user_id_str] = {
         'user_id': user_id,
+        'username': username,
         'approved_date': datetime.now().isoformat(),
         'expiry_date': expiry_date.isoformat() if expiry_date else None,
         'access_type': access_type
@@ -1440,6 +1441,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check for custom start message
     custom_message = get_start_message()
     
+    # Check which mass check gateways are disabled
+    mass_settings = load_mass_settings()
+    disabled_gateways = []
+    gateway_names = {'b3': 'B3 (Braintree)', 'pp': 'PP (PPCP)', 'ppro': 'PPRO (PayPal Pro)'}
+    for gw, name in gateway_names.items():
+        if not mass_settings.get(gw, True):
+            disabled_gateways.append(name)
+    
     if custom_message:
         # Use custom start message with placeholder replacement
         welcome_message = custom_message.replace('{username}', username)
@@ -1462,6 +1471,13 @@ Commands:
 /b3s <cards> - Check multiple cards (Braintree Auth)
 /pp <card/cards> - Check single or multiple cards (PPCP Gateway)
 /pro <card/cards> - Check single or multiple cards (PayPal Pro Gateway)
+"""
+    
+    # Add disabled mass check notice if any gateways are disabled
+    if disabled_gateways:
+        welcome_message += f"""
+⚠️ *Mass Check Disabled:*
+{', '.join(disabled_gateways)}
 """
     
     if is_admin:
@@ -2317,8 +2333,9 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     if action == 'admin_approve':
         await query.edit_message_text(
             "👥 *Approve User*\n\n"
-            "Use the command: `/approve <user_id>`\n"
-            "Example: `/approve 7405189284`",
+            "Use the command: `/approve <user_id> [username]`\n"
+            "Example: `/approve 7405189284`\n"
+            "Example: `/approve 7405189284 @johndoe`",
             parse_mode='Markdown'
         )
     
@@ -2332,6 +2349,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         for user_id_str, user_data in db.items():
             access_type = user_data.get('access_type', 'unknown')
             expiry = user_data.get('expiry_date')
+            username = user_data.get('username')
             
             if access_type == 'lifetime':
                 status = "♾️ Lifetime"
@@ -2343,7 +2361,9 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                     days_left = (expiry_date - datetime.now()).days
                     status = f"✅ {days_left} days left"
             
-            user_list += f"• User ID: `{user_id_str}` - {status}\n"
+            # Display username next to user ID if available
+            username_display = f" (@{username})" if username else ""
+            user_list += f"• `{user_id_str}`{username_display} - {status}\n"
         
         await query.edit_message_text(user_list, parse_mode='Markdown')
     
@@ -4877,8 +4897,9 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "❌ Please provide a user ID.\n\n"
-            "Format: /approve <user_id>\n"
-            "Example: /approve 7405189284"
+            "Format: /approve <user_id> [username]\n"
+            "Example: /approve 7405189284\n"
+            "Example: /approve 7405189284 @johndoe"
         )
         return
     
@@ -4889,10 +4910,15 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid user ID. Please provide a numeric user ID.")
         return
     
-    # Store pending approval (thread-safe)
+    # Try to get username if provided as second argument
+    target_username = None
+    if len(context.args) > 1:
+        target_username = context.args[1].lstrip('@')  # Remove @ if present
+    
+    # Store pending approval with username (thread-safe)
     with pending_approvals_lock:
-        pending_approvals[user_id] = target_user_id
-        print(f"DEBUG: Stored pending approval - Admin {user_id} -> Target {target_user_id}")
+        pending_approvals[user_id] = {'user_id': target_user_id, 'username': target_username}
+        print(f"DEBUG: Stored pending approval - Admin {user_id} -> Target {target_user_id} (@{target_username})")
         print(f"DEBUG: Current pending_approvals: {pending_approvals}")
     
     # Create inline keyboard for duration selection
@@ -4943,14 +4969,21 @@ async def duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ No pending approval found. Please use /approve <user_id> again.")
                 return
             
-            target_user_id = pending_approvals[user_id]
-            print(f"DEBUG: Target user ID: {target_user_id}")
+            pending_data = pending_approvals[user_id]
+            # Handle both old format (just user_id) and new format (dict with user_id and username)
+            if isinstance(pending_data, dict):
+                target_user_id = pending_data['user_id']
+                target_username = pending_data.get('username')
+            else:
+                target_user_id = pending_data
+                target_username = None
+            print(f"DEBUG: Target user ID: {target_user_id}, Username: {target_username}")
         
         duration_type = query.data.replace('duration_', '')
         print(f"DEBUG: Duration type: {duration_type}")
         
-        # Approve the user
-        success = approve_user(target_user_id, duration_type)
+        # Approve the user with username
+        success = approve_user(target_user_id, duration_type, username=target_username)
         print(f"DEBUG: Approval success: {success}")
         
         if success:
