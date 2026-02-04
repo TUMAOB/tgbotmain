@@ -5202,6 +5202,7 @@ async def system_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         
         keyboard = [
             [InlineKeyboardButton("♻️ Restore This Backup", callback_data=f'system_dorestore_{backup_name}')],
+            [InlineKeyboardButton("📥 Download ZIP", callback_data=f'system_downloadbackup_{backup_name}')],
             [InlineKeyboardButton("🗑️ Delete Backup", callback_data=f'system_deletebackup_{backup_name}')],
             [InlineKeyboardButton("⬅️ Back", callback_data='system_view_backups')],
         ]
@@ -5267,6 +5268,66 @@ async def system_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         else:
             await query.edit_message_text(
                 f"❌ *Delete Failed*\n\n{message}",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+    
+    elif action.startswith('system_downloadbackup_'):
+        backup_name = action.replace('system_downloadbackup_', '')
+        
+        await query.edit_message_text(
+            f"⏳ *Preparing backup ZIP...*\n\nPlease wait...",
+            parse_mode='Markdown'
+        )
+        
+        try:
+            # Get or create backup ZIP
+            zip_path = system_manager.get_backup_zip_path(backup_name)
+            
+            if not zip_path or not os.path.exists(zip_path):
+                keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data=f'system_viewbackup_{backup_name}')]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_text(
+                    f"❌ *Failed to create backup ZIP*\n\nPlease try again.",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+                return
+            
+            # Get file size
+            file_size_mb = round(os.path.getsize(zip_path) / (1024 * 1024), 2)
+            
+            await query.edit_message_text(
+                f"📤 *Uploading backup ZIP...*\n\nSize: {file_size_mb} MB\nPlease wait...",
+                parse_mode='Markdown'
+            )
+            
+            # Send the ZIP file
+            with open(zip_path, 'rb') as f:
+                await context.bot.send_document(
+                    chat_id=query.message.chat_id,
+                    document=f,
+                    filename=f"{backup_name}.zip",
+                    caption=f"📦 *Backup: {backup_name}*\n\nSize: {file_size_mb} MB",
+                    parse_mode='Markdown'
+                )
+            
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data=f'system_viewbackup_{backup_name}')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                f"✅ *Backup ZIP sent successfully!*\n\n"
+                f"📁 File: {backup_name}.zip\n"
+                f"💾 Size: {file_size_mb} MB",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data=f'system_viewbackup_{backup_name}')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                f"❌ *Download Failed*\n\n{str(e)}",
                 reply_markup=reply_markup,
                 parse_mode='Markdown'
             )
@@ -5540,8 +5601,42 @@ async def system_message_handler(update: Update, context: ContextTypes.DEFAULT_T
     )
     
     try:
-        # Download repository
-        success, message, source_dir = system_manager.download_github_repo(github_url)
+        # Progress tracking variables
+        last_update_time = [0]  # Use list to allow modification in nested function
+        progress_data = {'stage': '', 'percent': 0, 'message': ''}
+        
+        async def update_progress(stage, percent, message):
+            """Update progress message"""
+            import time
+            current_time = time.time()
+            
+            # Update at most every 1.5 seconds to avoid rate limits
+            if current_time - last_update_time[0] >= 1.5 or percent >= 90:
+                last_update_time[0] = current_time
+                progress_data['stage'] = stage
+                progress_data['percent'] = percent
+                progress_data['message'] = message
+                
+                # Create progress bar
+                bar_length = 10
+                filled = int(bar_length * percent / 100)
+                bar = '█' * filled + '░' * (bar_length - filled)
+                
+                try:
+                    await status_msg.edit_text(
+                        f"⏳ *System Update in Progress*\n\n"
+                        f"Progress: {bar} {percent}%\n"
+                        f"Status: {message}",
+                        parse_mode='Markdown'
+                    )
+                except:
+                    pass  # Ignore rate limit errors
+        
+        # Download repository with progress
+        success, message, source_dir = system_manager.download_github_repo(
+            github_url, 
+            progress_callback=lambda s, p, m: asyncio.create_task(update_progress(s, p, m))
+        )
         
         if not success:
             await status_msg.edit_text(
@@ -5550,13 +5645,12 @@ async def system_message_handler(update: Update, context: ContextTypes.DEFAULT_T
             )
             return
         
-        await status_msg.edit_text(
-            "⏳ *Creating backup and applying update...*\n\nPlease wait...",
-            parse_mode='Markdown'
+        # Apply update with progress
+        success, message, updated_files = system_manager.apply_system_update(
+            source_dir, 
+            create_backup=True,
+            progress_callback=lambda s, p, m: asyncio.create_task(update_progress(s, p, m))
         )
-        
-        # Apply update
-        success, message, updated_files = system_manager.apply_system_update(source_dir, create_backup=True)
         
         # Clean up temp directory
         system_manager.cleanup_temp_dir(source_dir)
@@ -5566,11 +5660,24 @@ async def system_message_handler(update: Update, context: ContextTypes.DEFAULT_T
             if len(updated_files) > 10:
                 files_list += f"\n... and {len(updated_files) - 10} more"
             
+            # Create restart script
+            script_success, script_msg, script_path = system_manager.create_restart_script()
+            
+            restart_instructions = ""
+            if script_success:
+                restart_instructions = (
+                    f"\n\n🔄 *Restart Options:*\n"
+                    f"1. Run: `bash {script_path}`\n"
+                    f"2. Or manually: `python3 run_production.py`"
+                )
+            else:
+                restart_instructions = "\n\n⚠️ Please restart manually: `python3 run_production.py`"
+            
             await status_msg.edit_text(
                 f"✅ *System Updated Successfully*\n\n"
                 f"📦 Updated {len(updated_files)} files:\n{files_list}\n\n"
-                "⚠️ *Important:* Please restart the bot for changes to take effect.\n\n"
-                "Use: `python run_production.py` or restart your service.",
+                f"⚠️ *Important:* Please restart the bot for changes to take effect."
+                f"{restart_instructions}",
                 parse_mode='Markdown'
             )
         else:
@@ -5659,8 +5766,37 @@ async def system_document_handler(update: Update, context: ContextTypes.DEFAULT_
             system_manager.cleanup_temp_dir(temp_dir)
             return
         
-        # Apply update
-        success, message, updated_files = system_manager.apply_system_update(source_dir, create_backup=True)
+        # Progress tracking for update
+        last_update_time = [0]
+        
+        async def update_progress(stage, percent, message):
+            """Update progress message"""
+            import time
+            current_time = time.time()
+            
+            if current_time - last_update_time[0] >= 1.5 or percent >= 90:
+                last_update_time[0] = current_time
+                
+                bar_length = 10
+                filled = int(bar_length * percent / 100)
+                bar = '█' * filled + '░' * (bar_length - filled)
+                
+                try:
+                    await status_msg.edit_text(
+                        f"⏳ *System Update in Progress*\n\n"
+                        f"Progress: {bar} {percent}%\n"
+                        f"Status: {message}",
+                        parse_mode='Markdown'
+                    )
+                except:
+                    pass
+        
+        # Apply update with progress
+        success, message, updated_files = system_manager.apply_system_update(
+            source_dir, 
+            create_backup=True,
+            progress_callback=lambda s, p, m: asyncio.create_task(update_progress(s, p, m))
+        )
         
         # Clean up temp directory
         system_manager.cleanup_temp_dir(temp_dir)
@@ -5670,11 +5806,24 @@ async def system_document_handler(update: Update, context: ContextTypes.DEFAULT_
             if len(updated_files) > 10:
                 files_list += f"\n... and {len(updated_files) - 10} more"
             
+            # Create restart script
+            script_success, script_msg, script_path = system_manager.create_restart_script()
+            
+            restart_instructions = ""
+            if script_success:
+                restart_instructions = (
+                    f"\n\n🔄 *Restart Options:*\n"
+                    f"1. Run: `bash {script_path}`\n"
+                    f"2. Or manually: `python3 run_production.py`"
+                )
+            else:
+                restart_instructions = "\n\n⚠️ Please restart manually: `python3 run_production.py`"
+            
             await status_msg.edit_text(
                 f"✅ *System Updated Successfully*\n\n"
                 f"📦 Updated {len(updated_files)} files:\n{files_list}\n\n"
-                "⚠️ *Important:* Please restart the bot for changes to take effect.\n\n"
-                "Use: `python run_production.py` or restart your service.",
+                f"⚠️ *Important:* Please restart the bot for changes to take effect."
+                f"{restart_instructions}",
                 parse_mode='Markdown'
             )
         else:
