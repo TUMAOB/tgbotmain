@@ -50,7 +50,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Import subprocess for auto-restart functionality
 import subprocess
 
-def save_restart_state(updated_files=None):
+def save_restart_state(updated_files=None, show_admin_menu=False):
     """Save restart state to notify admin after restart"""
     lock = SoftFileLock(RESTART_STATE_LOCK_FILE, timeout=10)
     with lock:
@@ -58,7 +58,8 @@ def save_restart_state(updated_files=None):
             'pending_notification': True,
             'admin_id': ADMIN_ID,
             'updated_files': updated_files or [],
-            'restart_time': datetime.now().isoformat()
+            'restart_time': datetime.now().isoformat(),
+            'show_admin_menu': show_admin_menu
         }
         with open(RESTART_STATE_FILE, 'w') as f:
             json.dump(state, f, indent=2)
@@ -82,19 +83,20 @@ def clear_restart_state():
         if os.path.exists(RESTART_STATE_FILE):
             os.remove(RESTART_STATE_FILE)
 
-def auto_restart_bot(updated_files=None):
+def auto_restart_bot(updated_files=None, show_admin_menu=False):
     """
     Automatically restart the bot by spawning a new process and exiting the current one.
     This function does not return - it exits the current process after starting the new one.
     
     Args:
         updated_files: List of files that were updated (for notification after restart)
+        show_admin_menu: Whether to show admin menu after restart
     """
     import sys
     import os
     
     # Save restart state for notification after restart
-    save_restart_state(updated_files)
+    save_restart_state(updated_files, show_admin_menu)
     
     # Get the current script path
     script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'run_production.py')
@@ -2371,10 +2373,13 @@ async def admin_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ],
     ]
     
-    # Only admin can manage mods
+    # Only admin can manage mods and restart system
     if is_admin:
         keyboard.append([
             InlineKeyboardButton("👮 Manage Mods", callback_data='admin_manage_mods'),
+        ])
+        keyboard.append([
+            InlineKeyboardButton("🔄 Restart System", callback_data='admin_restart'),
         ])
     
     keyboard.append([
@@ -2644,10 +2649,13 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             ],
         ]
         
-        # Only admin can manage mods
+        # Only admin can manage mods and restart system
         if is_admin:
             keyboard.append([
                 InlineKeyboardButton("👮 Manage Mods", callback_data='admin_manage_mods'),
+            ])
+            keyboard.append([
+                InlineKeyboardButton("🔄 Restart System", callback_data='admin_restart'),
             ])
         
         keyboard.append([
@@ -2661,6 +2669,45 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
+    
+    elif action == 'admin_restart':
+        # Only admin can restart the system
+        if not is_admin:
+            await query.edit_message_text("❌ Only the admin can restart the system.")
+            return
+        
+        # Show confirmation dialog
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Yes, Restart", callback_data='admin_restart_confirm'),
+                InlineKeyboardButton("❌ Cancel", callback_data='admin_back_main'),
+            ],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🔄 *Restart System*\n\n"
+            "⚠️ Are you sure you want to restart the bot?\n\n"
+            "The bot will be temporarily unavailable during restart.",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'admin_restart_confirm':
+        # Only admin can restart the system
+        if not is_admin:
+            await query.edit_message_text("❌ Only the admin can restart the system.")
+            return
+        
+        await query.edit_message_text(
+            "🔄 *Restarting System...*\n\n"
+            "Please wait, the bot will restart shortly.\n"
+            "You will receive the admin menu once the restart is complete.",
+            parse_mode='Markdown'
+        )
+        
+        # Trigger restart with flag to show admin menu after restart
+        auto_restart_bot(updated_files=None, show_admin_menu=True)
     
     elif action == 'admin_close':
         await query.delete_message()
@@ -5855,7 +5902,7 @@ async def system_document_handler(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def send_restart_confirmation(application):
-    """Send restart confirmation and system menu to admin after bot restart"""
+    """Send restart confirmation and admin/system menu to admin after bot restart"""
     restart_state = load_restart_state()
     
     if not restart_state or not restart_state.get('pending_notification'):
@@ -5863,6 +5910,7 @@ async def send_restart_confirmation(application):
     
     admin_id = restart_state.get('admin_id', ADMIN_ID)
     updated_files = restart_state.get('updated_files', [])
+    show_admin_menu = restart_state.get('show_admin_menu', False)
     
     try:
         # Build the files list for display
@@ -5882,8 +5930,44 @@ async def send_restart_confirmation(application):
             parse_mode='Markdown'
         )
         
-        # Get system info for the menu
-        if SYSTEM_MANAGER_AVAILABLE:
+        # Check if we should show admin menu or system menu
+        if show_admin_menu:
+            # Send admin control panel menu
+            keyboard = [
+                [
+                    InlineKeyboardButton("👥 Approve User", callback_data='admin_approve'),
+                    InlineKeyboardButton("📋 List Users", callback_data='admin_list_users'),
+                ],
+                [
+                    InlineKeyboardButton("⏱️ Set Check Interval", callback_data='admin_set_interval'),
+                    InlineKeyboardButton("📊 View Stats", callback_data='admin_stats'),
+                ],
+                [
+                    InlineKeyboardButton("🗑️ Remove User", callback_data='admin_remove'),
+                ],
+                [
+                    InlineKeyboardButton("⚙️ Settings", callback_data='admin_settings'),
+                ],
+                [
+                    InlineKeyboardButton("👮 Manage Mods", callback_data='admin_manage_mods'),
+                ],
+                [
+                    InlineKeyboardButton("🔄 Restart System", callback_data='admin_restart'),
+                ],
+                [
+                    InlineKeyboardButton("❌ Close", callback_data='admin_close'),
+                ],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await application.bot.send_message(
+                chat_id=admin_id,
+                text="🔧 *Admin Control Panel*\n\nSelect an option:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        elif SYSTEM_MANAGER_AVAILABLE:
+            # Send system management menu (for system updates)
             sys_info = system_manager.get_system_info()
             
             keyboard = [
