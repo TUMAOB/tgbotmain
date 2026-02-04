@@ -1,10 +1,38 @@
-requests
-beautifulsoup4
-user-agent
-python-telegram-bot
-filelock
-aiohttp
-asyncio
-aiocache
-python-json-logger
-nest_asyncio
+# Core HTTP and Web Scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+aiohttp>=3.9.0
+
+# Telegram Bot
+python-telegram-bot>=20.7
+
+# User Agent Generation
+user-agent>=0.1.10
+
+# File Locking for Thread Safety
+filelock>=3.13.0
+
+# Async Support
+asyncio-throttle>=1.0.2
+nest_asyncio>=1.5.8
+
+# Caching
+aiocache>=0.12.2
+
+# Logging
+python-json-logger>=2.0.7
+
+# Environment Variables
+python-dotenv>=1.0.0
+
+# Performance Optimization (optional but recommended)
+uvloop>=0.19.0; sys_platform != 'win32'
+
+# System Monitoring (optional)
+psutil>=5.9.0
+
+# SSL/TLS
+certifi>=2023.11.17
+
+# URL Parsing
+urllib3>=2.1.0

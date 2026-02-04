@@ -46,6 +46,10 @@ PPCP_AUTO_REMOVE_SETTINGS_LOCK_FILE = 'ppcp_auto_remove_settings.json.lock'
 MASS_SETTINGS_FILE = 'mass_settings.json'
 MASS_SETTINGS_LOCK_FILE = 'mass_settings.json.lock'
 
+# Gateway check interval settings file (check interval per gateway in seconds)
+GATEWAY_INTERVAL_SETTINGS_FILE = 'gateway_interval_settings.json'
+GATEWAY_INTERVAL_SETTINGS_LOCK_FILE = 'gateway_interval_settings.json.lock'
+
 # Bot settings file (start message, etc.)
 BOT_SETTINGS_FILE = 'bot_settings.json'
 BOT_SETTINGS_LOCK_FILE = 'bot_settings.json.lock'
@@ -444,6 +448,53 @@ def toggle_mass_setting(gateway):
     settings[gateway] = not settings.get(gateway, True)
     save_mass_settings(settings)
     return settings[gateway]
+
+# ============= GATEWAY CHECK INTERVAL SETTINGS FUNCTIONS =============
+
+# Valid check intervals in seconds
+VALID_CHECK_INTERVALS = [1, 5, 10, 15, 20, 30]
+
+def load_gateway_interval_settings():
+    """Load gateway check interval settings from file"""
+    lock = SoftFileLock(GATEWAY_INTERVAL_SETTINGS_LOCK_FILE, timeout=10)
+    with lock:
+        if os.path.exists(GATEWAY_INTERVAL_SETTINGS_FILE):
+            try:
+                with open(GATEWAY_INTERVAL_SETTINGS_FILE, 'r') as f:
+                    return json.load(f)
+            except:
+                pass
+        # Default: 1 second for all gateways
+        return {
+            'b3': 1,    # Braintree Auth
+            'pp': 1,    # PPCP
+            'ppro': 1   # PayPal Pro
+        }
+
+def save_gateway_interval_settings(settings):
+    """Save gateway check interval settings to file"""
+    lock = SoftFileLock(GATEWAY_INTERVAL_SETTINGS_LOCK_FILE, timeout=10)
+    with lock:
+        with open(GATEWAY_INTERVAL_SETTINGS_FILE, 'w') as f:
+            json.dump(settings, f, indent=2)
+
+def get_gateway_interval(gateway):
+    """Get check interval for a specific gateway in seconds"""
+    settings = load_gateway_interval_settings()
+    return settings.get(gateway, 1)
+
+def set_gateway_interval(gateway, interval_seconds):
+    """Set check interval for a specific gateway"""
+    if interval_seconds not in VALID_CHECK_INTERVALS:
+        return False
+    settings = load_gateway_interval_settings()
+    settings[gateway] = interval_seconds
+    save_gateway_interval_settings(settings)
+    return True
+
+def get_all_gateway_intervals():
+    """Get all gateway intervals"""
+    return load_gateway_interval_settings()
 
 # ============= BOT SETTINGS FUNCTIONS =============
 
@@ -2308,6 +2359,9 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 InlineKeyboardButton("🔄 Mass Check Settings", callback_data='settings_mass'),
             ],
             [
+                InlineKeyboardButton("⏱️ Gateway Check Intervals", callback_data='settings_gateway_intervals'),
+            ],
+            [
                 InlineKeyboardButton("📝 Start Message", callback_data='settings_start_message'),
             ],
             [
@@ -2637,6 +2691,33 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
             f"• PP (PPCP): {pp_status}\n"
             f"• PPRO (PayPal Pro): {ppro_status}\n\n"
             "Click to toggle:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'settings_gateway_intervals':
+        # Show gateway check interval settings
+        intervals = get_all_gateway_intervals()
+        
+        b3_interval = intervals.get('b3', 1)
+        pp_interval = intervals.get('pp', 1)
+        ppro_interval = intervals.get('ppro', 1)
+        
+        keyboard = [
+            [InlineKeyboardButton(f"⏱️ B3: {b3_interval}s", callback_data='gwinterval_b3')],
+            [InlineKeyboardButton(f"⏱️ PP: {pp_interval}s", callback_data='gwinterval_pp')],
+            [InlineKeyboardButton(f"⏱️ PPRO: {ppro_interval}s", callback_data='gwinterval_ppro')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "⏱️ *Gateway Check Intervals*\n\n"
+            "Set the check interval (delay between checks) for each gateway:\n\n"
+            f"• B3 (Braintree Auth): {b3_interval} second(s)\n"
+            f"• PP (PPCP): {pp_interval} second(s)\n"
+            f"• PPRO (PayPal Pro): {ppro_interval} second(s)\n\n"
+            "Click a gateway to change its interval:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -3565,6 +3646,100 @@ async def mass_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
+
+
+async def gwinterval_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle gateway check interval settings callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
+        return
+    
+    action = query.data
+    
+    if action.startswith('gwinterval_') and not action.startswith('gwinterval_set_'):
+        # Show interval selection for a specific gateway
+        gateway = action.replace('gwinterval_', '')
+        gateway_names = {'b3': 'B3 (Braintree Auth)', 'pp': 'PP (PPCP)', 'ppro': 'PPRO (PayPal Pro)'}
+        gateway_name = gateway_names.get(gateway, gateway.upper())
+        
+        current_interval = get_gateway_interval(gateway)
+        
+        # Create buttons for each valid interval
+        keyboard = []
+        row = []
+        for interval in VALID_CHECK_INTERVALS:
+            # Mark current interval with a checkmark
+            label = f"✅ {interval}s" if interval == current_interval else f"{interval}s"
+            row.append(InlineKeyboardButton(label, callback_data=f'gwinterval_set_{gateway}_{interval}'))
+            if len(row) == 3:  # 3 buttons per row
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='settings_gateway_intervals')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"⏱️ *Set Check Interval for {gateway_name}*\n\n"
+            f"Current interval: {current_interval} second(s)\n\n"
+            "Select a new interval:\n"
+            "• Lower = faster checks (more load)\n"
+            "• Higher = slower checks (less load)",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('gwinterval_set_'):
+        # Set the interval for a gateway
+        parts = action.replace('gwinterval_set_', '').split('_')
+        if len(parts) == 2:
+            gateway = parts[0]
+            try:
+                interval = int(parts[1])
+            except ValueError:
+                await query.edit_message_text("❌ Invalid interval value.")
+                return
+            
+            gateway_names = {'b3': 'B3', 'pp': 'PP', 'ppro': 'PPRO'}
+            gateway_name = gateway_names.get(gateway, gateway.upper())
+            
+            if set_gateway_interval(gateway, interval):
+                # Refresh the main gateway intervals menu
+                intervals = get_all_gateway_intervals()
+                
+                b3_interval = intervals.get('b3', 1)
+                pp_interval = intervals.get('pp', 1)
+                ppro_interval = intervals.get('ppro', 1)
+                
+                keyboard = [
+                    [InlineKeyboardButton(f"⏱️ B3: {b3_interval}s", callback_data='gwinterval_b3')],
+                    [InlineKeyboardButton(f"⏱️ PP: {pp_interval}s", callback_data='gwinterval_pp')],
+                    [InlineKeyboardButton(f"⏱️ PPRO: {ppro_interval}s", callback_data='gwinterval_ppro')],
+                    [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await query.edit_message_text(
+                    f"⏱️ *Gateway Check Intervals*\n\n"
+                    f"✅ {gateway_name} interval updated to {interval} second(s)\n\n"
+                    f"• B3 (Braintree Auth): {b3_interval} second(s)\n"
+                    f"• PP (PPCP): {pp_interval} second(s)\n"
+                    f"• PPRO (PayPal Pro): {ppro_interval} second(s)\n\n"
+                    "Click a gateway to change its interval:",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Invalid interval. Valid intervals are: {', '.join(str(i) for i in VALID_CHECK_INTERVALS)} seconds."
+                )
 
 
 async def startmsg_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4743,6 +4918,7 @@ def main():
     application.add_handler(CallbackQueryHandler(ppcp_callback_handler, pattern=r'^ppcp_'))
     application.add_handler(CallbackQueryHandler(paypalpro_callback_handler, pattern=r'^ppro_'))
     application.add_handler(CallbackQueryHandler(mass_callback_handler, pattern=r'^mass_'))
+    application.add_handler(CallbackQueryHandler(gwinterval_callback_handler, pattern=r'^gwinterval_'))
     application.add_handler(CallbackQueryHandler(startmsg_callback_handler, pattern=r'^startmsg_'))
     application.add_handler(CallbackQueryHandler(broadcast_callback_handler, pattern=r'^broadcast_'))
     application.add_handler(CallbackQueryHandler(autoscan_callback_handler, pattern=r'^autoscan_'))
