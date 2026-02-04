@@ -98,8 +98,8 @@ def auto_restart_bot(updated_files=None, show_admin_menu=False):
     # Save restart state for notification after restart
     save_restart_state(updated_files, show_admin_menu)
     
-    # Get the current script path
-    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'run_production.py')
+    # Get the current script path (auth.py - the Telegram bot)
+    script_path = os.path.abspath(__file__)
     
     # Start the new bot process in background
     subprocess.Popen(
