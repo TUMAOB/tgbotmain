@@ -36,6 +36,14 @@ except ImportError:
     GATEWAY_STATS_AVAILABLE = False
     print("Warning: Gateway stats module not available")
 
+# Import system manager for backup/restore/update
+try:
+    import system_manager
+    SYSTEM_MANAGER_AVAILABLE = True
+except ImportError:
+    SYSTEM_MANAGER_AVAILABLE = False
+    print("Warning: System manager module not available")
+
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -5030,6 +5038,659 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import traceback
     traceback.print_exc()
 
+
+# ============= SYSTEM MANAGEMENT HANDLERS =============
+
+# Store pending system actions
+pending_system_actions = {}
+pending_system_actions_lock = threading.Lock()
+
+
+async def system_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /system command - show system management menu (admin only)"""
+    user_id = update.effective_user.id
+    
+    # Only admin can access system management
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ This command is only available to the admin.")
+        return
+    
+    if not SYSTEM_MANAGER_AVAILABLE:
+        await update.message.reply_text("❌ System manager module is not available.")
+        return
+    
+    # Get system info
+    sys_info = system_manager.get_system_info()
+    
+    keyboard = [
+        [InlineKeyboardButton("💾 Create Backup", callback_data='system_backup')],
+        [InlineKeyboardButton("📂 View Backups", callback_data='system_view_backups')],
+        [InlineKeyboardButton("♻️ Restore Backup", callback_data='system_restore')],
+        [InlineKeyboardButton("🔄 Update System", callback_data='system_update')],
+        [InlineKeyboardButton("📊 System Info", callback_data='system_info')],
+        [InlineKeyboardButton("❌ Close", callback_data='system_close')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "🔧 *System Management*\n\n"
+        f"📁 Database Files: {len(sys_info['database_files'])}\n"
+        f"🌐 Gateway Sites: {len(sys_info['gateway_sites'])}\n"
+        f"🏪 B3 Sites: {len(sys_info['b3_sites'])}\n"
+        f"📦 Core Modules: {len(sys_info['core_modules'])}\n"
+        f"💾 Backups: {sys_info['backup_count']}\n\n"
+        "Select an option:",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+
+async def system_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle system management callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Only admin can access system management
+    if user_id != ADMIN_ID:
+        await query.edit_message_text("❌ This action is only available to the admin.")
+        return
+    
+    if not SYSTEM_MANAGER_AVAILABLE:
+        await query.edit_message_text("❌ System manager module is not available.")
+        return
+    
+    action = query.data
+    
+    if action == 'system_close':
+        await query.delete_message()
+        return
+    
+    elif action == 'system_backup':
+        # Show backup type selection
+        keyboard = [
+            [InlineKeyboardButton("📦 Full Backup", callback_data='system_backup_full')],
+            [InlineKeyboardButton("🗄️ Databases Only", callback_data='system_backup_databases')],
+            [InlineKeyboardButton("🏪 Sites Only", callback_data='system_backup_sites')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='system_back_main')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "💾 *Create Backup*\n\n"
+            "Select backup type:\n\n"
+            "• *Full Backup*: All databases, sites, bot token, and B3 site folders\n"
+            "• *Databases Only*: User DB, settings, forwarders, bot token\n"
+            "• *Sites Only*: Gateway sites and B3 site folders",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('system_backup_'):
+        backup_type = action.replace('system_backup_', '')
+        
+        await query.edit_message_text(
+            f"⏳ Creating {backup_type} backup...\n\nPlease wait...",
+            parse_mode='Markdown'
+        )
+        
+        # Create backup
+        success, message, backup_name = system_manager.create_backup(backup_type)
+        
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='system_back_main')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if success:
+            await query.edit_message_text(
+                f"✅ *Backup Created Successfully*\n\n"
+                f"📁 Name: `{backup_name}`\n"
+                f"📝 Type: {backup_type}\n"
+                f"💬 {message}",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ *Backup Failed*\n\n{message}",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+    
+    elif action == 'system_view_backups':
+        backups = system_manager.get_backup_list()
+        
+        if not backups:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='system_back_main')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "📂 *Available Backups*\n\nNo backups found.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        keyboard = []
+        for backup in backups[:10]:  # Show max 10 backups
+            backup_name = backup['name']
+            display_name = backup_name[:25] + "..." if len(backup_name) > 25 else backup_name
+            keyboard.append([InlineKeyboardButton(f"📁 {display_name}", callback_data=f'system_viewbackup_{backup_name}')])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='system_back_main')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"📂 *Available Backups* ({len(backups)} total)\n\n"
+            "Select a backup to view details:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('system_viewbackup_'):
+        backup_name = action.replace('system_viewbackup_', '')
+        backup_info = system_manager.get_backup_info(backup_name)
+        
+        if not backup_info:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='system_view_backups')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "❌ Backup not found.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        keyboard = [
+            [InlineKeyboardButton("♻️ Restore This Backup", callback_data=f'system_dorestore_{backup_name}')],
+            [InlineKeyboardButton("🗑️ Delete Backup", callback_data=f'system_deletebackup_{backup_name}')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='system_view_backups')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        created_at = backup_info.get('created_at', 'Unknown')
+        if created_at != 'Unknown':
+            try:
+                dt = datetime.fromisoformat(created_at)
+                created_at = dt.strftime('%Y-%m-%d %H:%M:%S')
+            except:
+                pass
+        
+        items = backup_info.get('items', [])
+        items_preview = '\n'.join([f"• {item}" for item in items[:5]])
+        if len(items) > 5:
+            items_preview += f"\n... and {len(items) - 5} more"
+        
+        await query.edit_message_text(
+            f"📁 *Backup Details*\n\n"
+            f"📛 Name: `{backup_name}`\n"
+            f"📅 Created: {created_at}\n"
+            f"📦 Type: {backup_info.get('type', 'Unknown')}\n"
+            f"📊 Items: {backup_info.get('item_count', len(items))}\n"
+            f"💾 Size: {backup_info.get('size_mb', 'N/A')} MB\n\n"
+            f"*Contents:*\n{items_preview}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('system_deletebackup_'):
+        backup_name = action.replace('system_deletebackup_', '')
+        
+        # Confirm deletion
+        keyboard = [
+            [InlineKeyboardButton("✅ Yes, Delete", callback_data=f'system_confirmdelete_{backup_name}')],
+            [InlineKeyboardButton("❌ Cancel", callback_data=f'system_viewbackup_{backup_name}')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"⚠️ *Confirm Deletion*\n\n"
+            f"Are you sure you want to delete backup:\n`{backup_name}`?\n\n"
+            "This action cannot be undone!",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('system_confirmdelete_'):
+        backup_name = action.replace('system_confirmdelete_', '')
+        
+        success, message = system_manager.delete_backup(backup_name)
+        
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='system_view_backups')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if success:
+            await query.edit_message_text(
+                f"✅ *Backup Deleted*\n\n{message}",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ *Delete Failed*\n\n{message}",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+    
+    elif action == 'system_restore':
+        backups = system_manager.get_backup_list()
+        
+        if not backups:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='system_back_main')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "♻️ *Restore Backup*\n\nNo backups available to restore.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        keyboard = []
+        for backup in backups[:10]:
+            backup_name = backup['name']
+            display_name = backup_name[:25] + "..." if len(backup_name) > 25 else backup_name
+            keyboard.append([InlineKeyboardButton(f"📁 {display_name}", callback_data=f'system_dorestore_{backup_name}')])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='system_back_main')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "♻️ *Restore Backup*\n\n"
+            "⚠️ *Warning:* Restoring will overwrite current data!\n\n"
+            "Select a backup to restore:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('system_dorestore_'):
+        backup_name = action.replace('system_dorestore_', '')
+        
+        # Show restore type options
+        keyboard = [
+            [InlineKeyboardButton("📦 Full Restore", callback_data=f'system_execrestore_full_{backup_name}')],
+            [InlineKeyboardButton("🗄️ Databases Only", callback_data=f'system_execrestore_databases_{backup_name}')],
+            [InlineKeyboardButton("🏪 Sites Only", callback_data=f'system_execrestore_sites_{backup_name}')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='system_restore')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"♻️ *Restore: {backup_name}*\n\n"
+            "Select what to restore:\n\n"
+            "• *Full Restore*: Everything in the backup\n"
+            "• *Databases Only*: User DB, settings, forwarders\n"
+            "• *Sites Only*: Gateway sites and B3 site folders",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('system_execrestore_'):
+        parts = action.replace('system_execrestore_', '').split('_', 1)
+        restore_type = parts[0]
+        backup_name = parts[1]
+        
+        await query.edit_message_text(
+            f"⏳ Restoring {restore_type} from backup...\n\nPlease wait...",
+            parse_mode='Markdown'
+        )
+        
+        success, message = system_manager.restore_backup(backup_name, restore_type)
+        
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='system_back_main')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if success:
+            await query.edit_message_text(
+                f"✅ *Restore Completed*\n\n"
+                f"📁 Backup: `{backup_name}`\n"
+                f"📦 Type: {restore_type}\n"
+                f"💬 {message}\n\n"
+                "⚠️ *Note:* You may need to restart the bot for changes to take effect.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ *Restore Failed*\n\n{message}",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+    
+    elif action == 'system_update':
+        # Show update options
+        keyboard = [
+            [InlineKeyboardButton("🔗 From GitHub URL", callback_data='system_update_github')],
+            [InlineKeyboardButton("📁 From ZIP File", callback_data='system_update_zip')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='system_back_main')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🔄 *Update System*\n\n"
+            "Choose update source:\n\n"
+            "• *GitHub URL*: Provide a GitHub repository link\n"
+            "• *ZIP File*: Send a ZIP file with the update\n\n"
+            "⚠️ *Note:* A backup will be created automatically before updating.",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'system_update_github':
+        # Store pending action
+        with pending_system_actions_lock:
+            pending_system_actions[user_id] = {'action': 'update_github'}
+        
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='system_update_cancel')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🔗 *Update from GitHub*\n\n"
+            "Please send the GitHub repository URL.\n\n"
+            "Supported formats:\n"
+            "• `https://github.com/user/repo`\n"
+            "• `https://github.com/user/repo.git`\n"
+            "• `https://github.com/user/repo/tree/branch`",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'system_update_zip':
+        # Store pending action
+        with pending_system_actions_lock:
+            pending_system_actions[user_id] = {'action': 'update_zip'}
+        
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='system_update_cancel')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "📁 *Update from ZIP File*\n\n"
+            "Please send the ZIP file containing the update.\n\n"
+            "The ZIP should contain the updated bot files (auth.py, core/, ppcp/, etc.)",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'system_update_cancel':
+        # Cancel pending action
+        with pending_system_actions_lock:
+            if user_id in pending_system_actions:
+                del pending_system_actions[user_id]
+        
+        # Go back to update menu
+        keyboard = [
+            [InlineKeyboardButton("🔗 From GitHub URL", callback_data='system_update_github')],
+            [InlineKeyboardButton("📁 From ZIP File", callback_data='system_update_zip')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='system_back_main')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🔄 *Update System*\n\n"
+            "Choose update source:\n\n"
+            "• *GitHub URL*: Provide a GitHub repository link\n"
+            "• *ZIP File*: Send a ZIP file with the update",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'system_info':
+        sys_info = system_manager.get_system_info()
+        
+        # Format database files
+        db_files_text = ""
+        for db in sys_info['database_files']:
+            size_kb = round(db['size'] / 1024, 2)
+            db_files_text += f"• {db['name']} ({size_kb} KB)\n"
+        
+        # Format gateway sites
+        gw_sites_text = ""
+        for gw in sys_info['gateway_sites']:
+            gw_sites_text += f"• {gw['name']}: {gw['count']} sites\n"
+        
+        # Format B3 sites
+        b3_sites_text = ", ".join(sys_info['b3_sites'][:5])
+        if len(sys_info['b3_sites']) > 5:
+            b3_sites_text += f" (+{len(sys_info['b3_sites']) - 5} more)"
+        
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='system_back_main')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "📊 *System Information*\n\n"
+            f"*Database Files:*\n{db_files_text or 'None'}\n"
+            f"*Gateway Sites:*\n{gw_sites_text or 'None'}\n"
+            f"*B3 Sites:* {b3_sites_text or 'None'}\n\n"
+            f"*Core Modules:* {', '.join(sys_info['core_modules']) or 'None'}\n"
+            f"*Total Backups:* {sys_info['backup_count']}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'system_back_main':
+        # Go back to main system menu
+        sys_info = system_manager.get_system_info()
+        
+        keyboard = [
+            [InlineKeyboardButton("💾 Create Backup", callback_data='system_backup')],
+            [InlineKeyboardButton("📂 View Backups", callback_data='system_view_backups')],
+            [InlineKeyboardButton("♻️ Restore Backup", callback_data='system_restore')],
+            [InlineKeyboardButton("🔄 Update System", callback_data='system_update')],
+            [InlineKeyboardButton("📊 System Info", callback_data='system_info')],
+            [InlineKeyboardButton("❌ Close", callback_data='system_close')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🔧 *System Management*\n\n"
+            f"📁 Database Files: {len(sys_info['database_files'])}\n"
+            f"🌐 Gateway Sites: {len(sys_info['gateway_sites'])}\n"
+            f"🏪 B3 Sites: {len(sys_info['b3_sites'])}\n"
+            f"📦 Core Modules: {len(sys_info['core_modules'])}\n"
+            f"💾 Backups: {sys_info['backup_count']}\n\n"
+            "Select an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+
+async def system_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming messages for system update (GitHub URL)"""
+    user_id = update.effective_user.id
+    
+    # Only admin can use system management
+    if user_id != ADMIN_ID:
+        return
+    
+    if not SYSTEM_MANAGER_AVAILABLE:
+        return
+    
+    message_text = update.message.text
+    if not message_text:
+        return
+    
+    # Check for pending system actions
+    with pending_system_actions_lock:
+        if user_id not in pending_system_actions:
+            return
+        
+        pending_action = pending_system_actions[user_id]
+        action_type = pending_action.get('action')
+        
+        if action_type != 'update_github':
+            return
+        
+        # Remove pending action
+        del pending_system_actions[user_id]
+    
+    # Process GitHub URL
+    github_url = message_text.strip()
+    
+    # Validate URL
+    if not github_url.startswith('https://github.com/'):
+        await update.message.reply_text(
+            "❌ Invalid GitHub URL. Please provide a valid GitHub repository URL.\n\n"
+            "Example: `https://github.com/user/repo`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Send processing message
+    status_msg = await update.message.reply_text(
+        "⏳ *Downloading repository...*\n\nPlease wait...",
+        parse_mode='Markdown'
+    )
+    
+    try:
+        # Download repository
+        success, message, source_dir = system_manager.download_github_repo(github_url)
+        
+        if not success:
+            await status_msg.edit_text(
+                f"❌ *Download Failed*\n\n{message}",
+                parse_mode='Markdown'
+            )
+            return
+        
+        await status_msg.edit_text(
+            "⏳ *Creating backup and applying update...*\n\nPlease wait...",
+            parse_mode='Markdown'
+        )
+        
+        # Apply update
+        success, message, updated_files = system_manager.apply_system_update(source_dir, create_backup=True)
+        
+        # Clean up temp directory
+        system_manager.cleanup_temp_dir(source_dir)
+        
+        if success:
+            files_list = '\n'.join([f"• {f}" for f in updated_files[:10]])
+            if len(updated_files) > 10:
+                files_list += f"\n... and {len(updated_files) - 10} more"
+            
+            await status_msg.edit_text(
+                f"✅ *System Updated Successfully*\n\n"
+                f"📦 Updated {len(updated_files)} files:\n{files_list}\n\n"
+                "⚠️ *Important:* Please restart the bot for changes to take effect.\n\n"
+                "Use: `python run_production.py` or restart your service.",
+                parse_mode='Markdown'
+            )
+        else:
+            await status_msg.edit_text(
+                f"❌ *Update Failed*\n\n{message}\n\n"
+                "A backup was created before the update attempt.",
+                parse_mode='Markdown'
+            )
+    
+    except Exception as e:
+        await status_msg.edit_text(
+            f"❌ *Error*\n\n{str(e)}",
+            parse_mode='Markdown'
+        )
+
+
+async def system_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming ZIP files for system update"""
+    user_id = update.effective_user.id
+    
+    # Only admin can use system management
+    if user_id != ADMIN_ID:
+        return
+    
+    if not SYSTEM_MANAGER_AVAILABLE:
+        return
+    
+    document = update.message.document
+    if not document:
+        return
+    
+    # Check for pending system actions
+    with pending_system_actions_lock:
+        if user_id not in pending_system_actions:
+            return
+        
+        pending_action = pending_system_actions[user_id]
+        action_type = pending_action.get('action')
+        
+        if action_type != 'update_zip':
+            return
+        
+        # Remove pending action
+        del pending_system_actions[user_id]
+    
+    # Check if it's a ZIP file
+    file_name = document.file_name or ''
+    if not file_name.lower().endswith('.zip'):
+        await update.message.reply_text(
+            "❌ Please send a ZIP file (.zip extension).",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Send processing message
+    status_msg = await update.message.reply_text(
+        "⏳ *Downloading ZIP file...*\n\nPlease wait...",
+        parse_mode='Markdown'
+    )
+    
+    try:
+        # Download the file
+        file = await context.bot.get_file(document.file_id)
+        
+        # Create temp directory
+        import tempfile
+        temp_dir = tempfile.mkdtemp(prefix='zip_update_')
+        zip_path = os.path.join(temp_dir, 'update.zip')
+        
+        # Download to temp file
+        await file.download_to_drive(zip_path)
+        
+        await status_msg.edit_text(
+            "⏳ *Extracting and applying update...*\n\nPlease wait...",
+            parse_mode='Markdown'
+        )
+        
+        # Extract ZIP
+        success, message, source_dir = system_manager.extract_zip_file(zip_path)
+        
+        if not success:
+            await status_msg.edit_text(
+                f"❌ *Extraction Failed*\n\n{message}",
+                parse_mode='Markdown'
+            )
+            system_manager.cleanup_temp_dir(temp_dir)
+            return
+        
+        # Apply update
+        success, message, updated_files = system_manager.apply_system_update(source_dir, create_backup=True)
+        
+        # Clean up temp directory
+        system_manager.cleanup_temp_dir(temp_dir)
+        
+        if success:
+            files_list = '\n'.join([f"• {f}" for f in updated_files[:10]])
+            if len(updated_files) > 10:
+                files_list += f"\n... and {len(updated_files) - 10} more"
+            
+            await status_msg.edit_text(
+                f"✅ *System Updated Successfully*\n\n"
+                f"📦 Updated {len(updated_files)} files:\n{files_list}\n\n"
+                "⚠️ *Important:* Please restart the bot for changes to take effect.\n\n"
+                "Use: `python run_production.py` or restart your service.",
+                parse_mode='Markdown'
+            )
+        else:
+            await status_msg.edit_text(
+                f"❌ *Update Failed*\n\n{message}\n\n"
+                "A backup was created before the update attempt.",
+                parse_mode='Markdown'
+            )
+    
+    except Exception as e:
+        await status_msg.edit_text(
+            f"❌ *Error*\n\n{str(e)}",
+            parse_mode='Markdown'
+        )
+
+
 def main():
     """Main function to run the bot"""
     print("🚀 Starting Telegram Bot...")
@@ -5060,6 +5721,7 @@ def main():
     application.add_handler(CommandHandler("admin", admin_menu_command))
     application.add_handler(CommandHandler("remove", remove_user_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("system", system_command))
     
     # Add callback query handlers (must be before generic handlers)
     application.add_handler(CallbackQueryHandler(duration_callback, pattern=r'^duration_'))
@@ -5082,9 +5744,16 @@ def main():
     application.add_handler(CallbackQueryHandler(broadcast_callback_handler, pattern=r'^broadcast_'))
     application.add_handler(CallbackQueryHandler(autoscan_callback_handler, pattern=r'^autoscan_'))
     application.add_handler(CallbackQueryHandler(mods_callback_handler, pattern=r'^mods_'))
+    application.add_handler(CallbackQueryHandler(system_callback_handler, pattern=r'^system_'))
     
     # Add message handler for file editing (must be before catch-all)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, file_edit_message_handler))
+    
+    # Add message handler for system update (GitHub URL)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, system_message_handler))
+    
+    # Add document handler for system update (ZIP file)
+    application.add_handler(MessageHandler(filters.Document.ALL, system_document_handler))
     
     # Add catch-all callback handler for debugging (must be last)
     application.add_handler(CallbackQueryHandler(unknown_callback_handler))
