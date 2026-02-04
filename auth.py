@@ -5601,41 +5601,20 @@ async def system_message_handler(update: Update, context: ContextTypes.DEFAULT_T
     )
     
     try:
-        # Progress tracking variables
-        last_update_time = [0]  # Use list to allow modification in nested function
-        progress_data = {'stage': '', 'percent': 0, 'message': ''}
+        # Run download in thread executor to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
         
-        async def update_progress(stage, percent, message):
-            """Update progress message"""
-            import time
-            current_time = time.time()
-            
-            # Update at most every 1.5 seconds to avoid rate limits
-            if current_time - last_update_time[0] >= 1.5 or percent >= 90:
-                last_update_time[0] = current_time
-                progress_data['stage'] = stage
-                progress_data['percent'] = percent
-                progress_data['message'] = message
-                
-                # Create progress bar
-                bar_length = 10
-                filled = int(bar_length * percent / 100)
-                bar = '█' * filled + '░' * (bar_length - filled)
-                
-                try:
-                    await status_msg.edit_text(
-                        f"⏳ *System Update in Progress*\n\n"
-                        f"Progress: {bar} {percent}%\n"
-                        f"Status: {message}",
-                        parse_mode='Markdown'
-                    )
-                except:
-                    pass  # Ignore rate limit errors
+        # Download repository (run in executor to avoid blocking)
+        await status_msg.edit_text(
+            "⏳ *System Update in Progress*\n\n"
+            "Progress: ██░░░░░░░░ 20%\n"
+            "Status: Downloading repository...",
+            parse_mode='Markdown'
+        )
         
-        # Download repository with progress
-        success, message, source_dir = system_manager.download_github_repo(
-            github_url, 
-            progress_callback=lambda s, p, m: asyncio.create_task(update_progress(s, p, m))
+        success, message, source_dir = await loop.run_in_executor(
+            None,
+            lambda: system_manager.download_github_repo(github_url, progress_callback=None)
         )
         
         if not success:
@@ -5645,11 +5624,17 @@ async def system_message_handler(update: Update, context: ContextTypes.DEFAULT_T
             )
             return
         
-        # Apply update with progress
-        success, message, updated_files = system_manager.apply_system_update(
-            source_dir, 
-            create_backup=True,
-            progress_callback=lambda s, p, m: asyncio.create_task(update_progress(s, p, m))
+        # Apply update (run in executor to avoid blocking)
+        await status_msg.edit_text(
+            "⏳ *System Update in Progress*\n\n"
+            "Progress: █████░░░░░ 50%\n"
+            "Status: Creating backup and applying update...",
+            parse_mode='Markdown'
+        )
+        
+        success, message, updated_files = await loop.run_in_executor(
+            None,
+            lambda: system_manager.apply_system_update(source_dir, create_backup=True, progress_callback=None)
         )
         
         # Clean up temp directory
@@ -5766,36 +5751,18 @@ async def system_document_handler(update: Update, context: ContextTypes.DEFAULT_
             system_manager.cleanup_temp_dir(temp_dir)
             return
         
-        # Progress tracking for update
-        last_update_time = [0]
+        # Apply update (run in executor to avoid blocking the event loop)
+        await status_msg.edit_text(
+            "⏳ *System Update in Progress*\n\n"
+            "Progress: █████░░░░░ 50%\n"
+            "Status: Creating backup and applying update...",
+            parse_mode='Markdown'
+        )
         
-        async def update_progress(stage, percent, message):
-            """Update progress message"""
-            import time
-            current_time = time.time()
-            
-            if current_time - last_update_time[0] >= 1.5 or percent >= 90:
-                last_update_time[0] = current_time
-                
-                bar_length = 10
-                filled = int(bar_length * percent / 100)
-                bar = '█' * filled + '░' * (bar_length - filled)
-                
-                try:
-                    await status_msg.edit_text(
-                        f"⏳ *System Update in Progress*\n\n"
-                        f"Progress: {bar} {percent}%\n"
-                        f"Status: {message}",
-                        parse_mode='Markdown'
-                    )
-                except:
-                    pass
-        
-        # Apply update with progress
-        success, message, updated_files = system_manager.apply_system_update(
-            source_dir, 
-            create_backup=True,
-            progress_callback=lambda s, p, m: asyncio.create_task(update_progress(s, p, m))
+        loop = asyncio.get_event_loop()
+        success, message, updated_files = await loop.run_in_executor(
+            None,
+            lambda: system_manager.apply_system_update(source_dir, create_backup=True, progress_callback=None)
         )
         
         # Clean up temp directory
