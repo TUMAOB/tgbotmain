@@ -130,6 +130,23 @@ def validate_restart_prerequisites() -> tuple:
     return True, "All prerequisites validated", RESTART_ERROR_NONE
 
 
+def escape_markdown(text: str) -> str:
+    """
+    Escape special Markdown characters to prevent parsing errors in Telegram messages.
+    
+    Args:
+        text: The text to escape
+        
+    Returns:
+        Text with special Markdown characters escaped
+    """
+    # Characters that need escaping in Telegram Markdown
+    special_chars = ['_', '*', '[', ']', '`']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+
 def save_restart_state(updated_files=None, show_admin_menu=False) -> tuple:
     """
     Save restart state to notify admin after restart.
@@ -5941,7 +5958,8 @@ async def system_message_handler(update: Update, context: ContextTypes.DEFAULT_T
         system_manager.cleanup_temp_dir(source_dir)
         
         if success:
-            files_list = '\n'.join([f"• {f}" for f in updated_files[:10]])
+            # Escape file names to prevent Markdown parsing errors
+            files_list = '\n'.join([f"• {escape_markdown(f)}" for f in updated_files[:10]])
             if len(updated_files) > 10:
                 files_list += f"\n... and {len(updated_files) - 10} more"
             
@@ -5957,14 +5975,14 @@ async def system_message_handler(update: Update, context: ContextTypes.DEFAULT_T
             auto_restart_bot(updated_files)
         else:
             await status_msg.edit_text(
-                f"❌ *Update Failed*\n\n{message}\n\n"
+                f"❌ *Update Failed*\n\n{escape_markdown(message)}\n\n"
                 "A backup was created before the update attempt.",
                 parse_mode='Markdown'
             )
     
     except Exception as e:
         await status_msg.edit_text(
-            f"❌ *Error*\n\n{str(e)}",
+            f"❌ *Error*\n\n{escape_markdown(str(e))}",
             parse_mode='Markdown'
         )
 
@@ -6035,7 +6053,7 @@ async def system_document_handler(update: Update, context: ContextTypes.DEFAULT_
         
         if not success:
             await status_msg.edit_text(
-                f"❌ *Extraction Failed*\n\n{message}",
+                f"❌ *Extraction Failed*\n\n{escape_markdown(message)}",
                 parse_mode='Markdown'
             )
             system_manager.cleanup_temp_dir(temp_dir)
@@ -6059,7 +6077,8 @@ async def system_document_handler(update: Update, context: ContextTypes.DEFAULT_
         system_manager.cleanup_temp_dir(temp_dir)
         
         if success:
-            files_list = '\n'.join([f"• {f}" for f in updated_files[:10]])
+            # Escape file names to prevent Markdown parsing errors
+            files_list = '\n'.join([f"• {escape_markdown(f)}" for f in updated_files[:10]])
             if len(updated_files) > 10:
                 files_list += f"\n... and {len(updated_files) - 10} more"
             
@@ -6075,14 +6094,14 @@ async def system_document_handler(update: Update, context: ContextTypes.DEFAULT_
             auto_restart_bot(updated_files)
         else:
             await status_msg.edit_text(
-                f"❌ *Update Failed*\n\n{message}\n\n"
+                f"❌ *Update Failed*\n\n{escape_markdown(message)}\n\n"
                 "A backup was created before the update attempt.",
                 parse_mode='Markdown'
             )
     
     except Exception as e:
         await status_msg.edit_text(
-            f"❌ *Error*\n\n{str(e)}",
+            f"❌ *Error*\n\n{escape_markdown(str(e))}",
             parse_mode='Markdown'
         )
 
@@ -6101,7 +6120,8 @@ async def send_restart_confirmation(application):
     try:
         # Build the files list for display
         if updated_files:
-            files_list = '\n'.join([f"• {f}" for f in updated_files[:15]])
+            # Escape file names to prevent Markdown parsing errors
+            files_list = '\n'.join([f"• {escape_markdown(f)}" for f in updated_files[:15]])
             if len(updated_files) > 15:
                 files_list += f"\n... and {len(updated_files) - 15} more"
             files_info = f"\n\n📦 *Updated {len(updated_files)} files:*\n{files_list}"
