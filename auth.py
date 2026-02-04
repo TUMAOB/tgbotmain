@@ -50,66 +50,221 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Import subprocess for auto-restart functionality
 import subprocess
 
-def save_restart_state(updated_files=None, show_admin_menu=False):
-    """Save restart state to notify admin after restart"""
-    lock = SoftFileLock(RESTART_STATE_LOCK_FILE, timeout=10)
-    with lock:
-        state = {
-            'pending_notification': True,
-            'admin_id': ADMIN_ID,
-            'updated_files': updated_files or [],
-            'restart_time': datetime.now().isoformat(),
-            'show_admin_menu': show_admin_menu
-        }
-        with open(RESTART_STATE_FILE, 'w') as f:
-            json.dump(state, f, indent=2)
+# Restart error codes
+RESTART_ERROR_NONE = 0
+RESTART_ERROR_SCRIPT_NOT_FOUND = 1
+RESTART_ERROR_DEPENDENCIES_MISSING = 2
+RESTART_ERROR_STATE_SAVE_FAILED = 3
+RESTART_ERROR_PROCESS_START_FAILED = 4
+RESTART_ERROR_VALIDATION_FAILED = 5
+
+
+class RestartError(Exception):
+    """Custom exception for restart-related errors"""
+    def __init__(self, message: str, error_code: int):
+        self.message = message
+        self.error_code = error_code
+        super().__init__(self.message)
+
+
+def validate_restart_prerequisites() -> tuple:
+    """
+    Validate that all prerequisites for restart are met.
+    
+    Returns:
+        Tuple of (is_valid: bool, error_message: str, error_code: int)
+    """
+    script_path = os.path.abspath(__file__)
+    
+    # Check 1: Verify the script file exists
+    if not os.path.exists(script_path):
+        return False, f"Script file not found: {script_path}", RESTART_ERROR_SCRIPT_NOT_FOUND
+    
+    # Check 2: Verify the script is readable
+    if not os.access(script_path, os.R_OK):
+        return False, f"Script file not readable: {script_path}", RESTART_ERROR_SCRIPT_NOT_FOUND
+    
+    # Check 3: Verify Python executable exists
+    if not os.path.exists(sys.executable):
+        return False, f"Python executable not found: {sys.executable}", RESTART_ERROR_DEPENDENCIES_MISSING
+    
+    # Check 4: Verify critical dependencies are importable
+    critical_modules = [
+        ('telegram', 'python-telegram-bot'),
+        ('filelock', 'filelock'),
+        ('requests', 'requests'),
+        ('bs4', 'beautifulsoup4'),
+    ]
+    
+    missing_modules = []
+    for module_name, package_name in critical_modules:
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing_modules.append(package_name)
+    
+    if missing_modules:
+        return False, f"Missing dependencies: {', '.join(missing_modules)}", RESTART_ERROR_DEPENDENCIES_MISSING
+    
+    # Check 5: Verify bot token is available
+    bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
+    if not bot_token:
+        token_file = 'bot_token.txt'
+        if not os.path.exists(token_file):
+            return False, "Bot token not found (no env var or bot_token.txt)", RESTART_ERROR_VALIDATION_FAILED
+        try:
+            with open(token_file, 'r') as f:
+                bot_token = f.read().strip()
+            if not bot_token:
+                return False, "Bot token file is empty", RESTART_ERROR_VALIDATION_FAILED
+        except Exception as e:
+            return False, f"Failed to read bot token: {str(e)}", RESTART_ERROR_VALIDATION_FAILED
+    
+    # Check 6: Verify we can write to the log file
+    try:
+        with open('bot.log', 'a') as f:
+            pass  # Just test if we can open for append
+    except Exception as e:
+        return False, f"Cannot write to bot.log: {str(e)}", RESTART_ERROR_VALIDATION_FAILED
+    
+    return True, "All prerequisites validated", RESTART_ERROR_NONE
+
+
+def save_restart_state(updated_files=None, show_admin_menu=False) -> tuple:
+    """
+    Save restart state to notify admin after restart.
+    
+    Args:
+        updated_files: List of files that were updated
+        show_admin_menu: Whether to show admin menu after restart
+        
+    Returns:
+        Tuple of (success: bool, error_message: str)
+    """
+    try:
+        lock = SoftFileLock(RESTART_STATE_LOCK_FILE, timeout=10)
+        with lock:
+            state = {
+                'pending_notification': True,
+                'admin_id': ADMIN_ID,
+                'updated_files': updated_files or [],
+                'restart_time': datetime.now().isoformat(),
+                'show_admin_menu': show_admin_menu
+            }
+            with open(RESTART_STATE_FILE, 'w') as f:
+                json.dump(state, f, indent=2)
+        return True, "State saved successfully"
+    except Exception as e:
+        return False, f"Failed to save restart state: {str(e)}"
+
 
 def load_restart_state():
     """Load restart state from file"""
-    lock = SoftFileLock(RESTART_STATE_LOCK_FILE, timeout=10)
-    with lock:
-        if os.path.exists(RESTART_STATE_FILE):
-            try:
-                with open(RESTART_STATE_FILE, 'r') as f:
-                    return json.load(f)
-            except:
-                return None
+    try:
+        lock = SoftFileLock(RESTART_STATE_LOCK_FILE, timeout=10)
+        with lock:
+            if os.path.exists(RESTART_STATE_FILE):
+                try:
+                    with open(RESTART_STATE_FILE, 'r') as f:
+                        return json.load(f)
+                except json.JSONDecodeError as e:
+                    print(f"⚠️ Restart state file corrupted: {str(e)}")
+                    return None
+                except Exception as e:
+                    print(f"⚠️ Error reading restart state: {str(e)}")
+                    return None
+            return None
+    except Exception as e:
+        print(f"⚠️ Failed to acquire lock for restart state: {str(e)}")
         return None
+
 
 def clear_restart_state():
     """Clear restart state after notification is sent"""
-    lock = SoftFileLock(RESTART_STATE_LOCK_FILE, timeout=10)
-    with lock:
-        if os.path.exists(RESTART_STATE_FILE):
-            os.remove(RESTART_STATE_FILE)
+    try:
+        lock = SoftFileLock(RESTART_STATE_LOCK_FILE, timeout=10)
+        with lock:
+            if os.path.exists(RESTART_STATE_FILE):
+                os.remove(RESTART_STATE_FILE)
+    except Exception as e:
+        print(f"⚠️ Failed to clear restart state: {str(e)}")
 
-def auto_restart_bot(updated_files=None, show_admin_menu=False):
+
+def auto_restart_bot(updated_files=None, show_admin_menu=False) -> tuple:
     """
     Automatically restart the bot by spawning a new process and exiting the current one.
-    This function does not return - it exits the current process after starting the new one.
+    This function does not return on success - it exits the current process after starting the new one.
     
     Args:
         updated_files: List of files that were updated (for notification after restart)
         show_admin_menu: Whether to show admin menu after restart
+        
+    Returns:
+        Tuple of (success: bool, error_message: str) - only returns on failure
+        
+    Raises:
+        RestartError: If restart fails due to validation or process issues
     """
-    import sys
-    import os
+    # Step 1: Validate prerequisites
+    is_valid, error_msg, error_code = validate_restart_prerequisites()
+    if not is_valid:
+        print(f"❌ Restart validation failed: {error_msg}")
+        return False, error_msg
     
-    # Save restart state for notification after restart
-    save_restart_state(updated_files, show_admin_menu)
+    # Step 2: Save restart state for notification after restart
+    state_saved, state_error = save_restart_state(updated_files, show_admin_menu)
+    if not state_saved:
+        print(f"❌ Failed to save restart state: {state_error}")
+        return False, state_error
     
-    # Get the current script path (auth.py - the Telegram bot)
+    # Step 3: Get the current script path (auth.py - the Telegram bot)
     script_path = os.path.abspath(__file__)
     
-    # Start the new bot process in background
-    subprocess.Popen(
-        [sys.executable, script_path],
-        stdout=open('bot.log', 'a'),
-        stderr=subprocess.STDOUT,
-        start_new_session=True
-    )
+    # Step 4: Start the new bot process in background
+    try:
+        log_file = open('bot.log', 'a')
+        process = subprocess.Popen(
+            [sys.executable, script_path],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True
+        )
+        
+        # Verify the process started successfully
+        # Give it a moment to start
+        import time
+        time.sleep(0.5)
+        
+        # Check if process is still running (poll returns None if running)
+        if process.poll() is not None:
+            # Process exited immediately - something went wrong
+            return_code = process.returncode
+            error_msg = f"New bot process exited immediately with code {return_code}"
+            print(f"❌ {error_msg}")
+            # Clear the restart state since restart failed
+            clear_restart_state()
+            return False, error_msg
+        
+        print(f"✅ New bot process started with PID: {process.pid}")
+        
+    except FileNotFoundError as e:
+        error_msg = f"Python executable not found: {str(e)}"
+        print(f"❌ {error_msg}")
+        clear_restart_state()
+        return False, error_msg
+    except PermissionError as e:
+        error_msg = f"Permission denied starting new process: {str(e)}"
+        print(f"❌ {error_msg}")
+        clear_restart_state()
+        return False, error_msg
+    except Exception as e:
+        error_msg = f"Failed to start new bot process: {str(e)}"
+        print(f"❌ {error_msg}")
+        clear_restart_state()
+        return False, error_msg
     
-    # Exit the current process
+    # Step 5: Exit the current process
+    print("🔄 Exiting current process for restart...")
     os._exit(0)
 
 # Admin user ID
@@ -2699,6 +2854,22 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             await query.edit_message_text("❌ Only the admin can restart the system.")
             return
         
+        # First validate prerequisites before showing restart message
+        is_valid, error_msg, error_code = validate_restart_prerequisites()
+        if not is_valid:
+            keyboard = [
+                [InlineKeyboardButton("⬅️ Back", callback_data='admin_back_main')],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                f"❌ *Restart Failed*\n\n"
+                f"Validation error: {error_msg}\n\n"
+                f"Error code: {error_code}",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
         await query.edit_message_text(
             "🔄 *Restarting System...*\n\n"
             "Please wait, the bot will restart shortly.\n"
@@ -2707,7 +2878,22 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
         
         # Trigger restart with flag to show admin menu after restart
-        auto_restart_bot(updated_files=None, show_admin_menu=True)
+        success, error_msg = auto_restart_bot(updated_files=None, show_admin_menu=True)
+        
+        # If we reach here, restart failed (auto_restart_bot exits on success)
+        if not success:
+            keyboard = [
+                [InlineKeyboardButton("🔄 Retry", callback_data='admin_restart_confirm')],
+                [InlineKeyboardButton("⬅️ Back", callback_data='admin_back_main')],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                f"❌ *Restart Failed*\n\n"
+                f"Error: {error_msg}\n\n"
+                f"Please check the logs and try again.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
     
     elif action == 'admin_close':
         await query.delete_message()
