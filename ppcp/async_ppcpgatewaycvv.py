@@ -9,6 +9,7 @@ Features:
 - Optimized for fast production use
 - Empty response detection with retry logic
 - Multiple BIN lookup APIs with fallback
+- Gateway usage statistics tracking
 """
 import asyncio
 import aiohttp
@@ -17,6 +18,7 @@ import re
 import random
 import time
 import os
+import sys
 import logging
 from urllib.parse import urlparse, parse_qs, urlencode
 from datetime import datetime
@@ -30,6 +32,16 @@ from .site_manager import (
     load_sites, get_available_sites, check_and_handle_bad_site,
     is_bad_response, add_bad_site, BAD_SITE_PATTERNS
 )
+
+# Import gateway stats tracker
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
+try:
+    from gateway_stats import track_request_start, track_request_end
+    GATEWAY_STATS_AVAILABLE = True
+except ImportError:
+    GATEWAY_STATS_AVAILABLE = False
+    def track_request_start(gateway): pass
+    def track_request_end(gateway, success, response_time=0): pass
 
 # Configure logging
 logging.basicConfig(
@@ -1091,84 +1103,101 @@ def _is_bad_site_response(result: Dict[str, Any]) -> bool:
 async def check_single_card(card_details: str, site_urls: List[str], proxy: Optional[str] = None) -> str:
     """Check a single card asynchronously with bad site handling and empty response retry"""
     global _session
-    if _session is None:
-        _session = await create_session()
     
-    # Get available sites (excluding bad ones)
-    available_sites = get_available_sites() if not site_urls else site_urls
+    # Track gateway usage start
+    check_start_time = time.time()
+    if GATEWAY_STATS_AVAILABLE:
+        track_request_start('pp')
     
-    if not available_sites:
-        # Fallback to original sites if all are marked bad
-        available_sites = site_urls if site_urls else load_sites()
-    
-    if not available_sites:
-        return "❌ No sites available! All sites may be marked as bad."
-    
-    # Make a copy of available sites to track which ones we've tried
-    sites_to_try = available_sites.copy()
-    random.shuffle(sites_to_try)
-    
-    max_site_retries = min(5, len(sites_to_try))  # Try up to 5 different sites for bad site issues
-    empty_response_retries = 3  # Retry 3 times on same site for empty responses before marking as bad
-    tried_sites = []
-    last_result = None
-    
-    for site_attempt in range(max_site_retries):
-        if not sites_to_try:
-            break
-            
-        site_url = sites_to_try.pop(0)
-        tried_sites.append(site_url)
+    try:
+        if _session is None:
+            _session = await create_session()
         
-        logger.info(f"Checking card on site: {site_url} (site attempt {site_attempt + 1}/{max_site_retries})")
+        # Get available sites (excluding bad ones)
+        available_sites = get_available_sites() if not site_urls else site_urls
         
-        # Retry loop for empty responses on the same site
-        empty_retry_count = 0
-        site_has_empty_response = False
+        if not available_sites:
+            # Fallback to original sites if all are marked bad
+            available_sites = site_urls if site_urls else load_sites()
         
-        for empty_retry in range(empty_response_retries):
-            checker = AsyncCardChecker(card_details, site_url, proxy, _session)
-            result = await checker.check()
-            last_result = result
-            
-            # Check if response indicates a bad site (out of stock, cannot find product ID, etc.)
-            # If bad site detected, the site is already moved to badsites.txt by the checker
-            # Don't send response, just retry with a different site
-            if _is_bad_site_response(result):
-                logger.warning(f"Bad site detected: {site_url} - {result.get('message', 'Unknown')}. Retrying with different site...")
-                break  # Exit empty retry loop, try next site
-            
-            # Check if response is empty or has no meaningful message
-            if _is_empty_response(result):
-                empty_retry_count += 1
-                logger.warning(f"Empty response from site {site_url}, retry {empty_retry_count}/{empty_response_retries}")
+        if not available_sites:
+            # Track failed request
+            check_elapsed = time.time() - check_start_time
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_end('pp', success=False, response_time=check_elapsed)
+            return "❌ No sites available! All sites may be marked as bad."
+        
+        # Make a copy of available sites to track which ones we've tried
+        sites_to_try = available_sites.copy()
+        random.shuffle(sites_to_try)
+        
+        max_site_retries = min(5, len(sites_to_try))  # Try up to 5 different sites for bad site issues
+        empty_response_retries = 3  # Retry 3 times on same site for empty responses before marking as bad
+        tried_sites = []
+        last_result = None
+        
+        for site_attempt in range(max_site_retries):
+            if not sites_to_try:
+                break
                 
-                if empty_retry_count < empty_response_retries:
-                    # Wait a bit before retrying on same site
-                    await asyncio.sleep(0.5)
-                    continue  # Retry on same site
-                else:
-                    # After 3 retries with empty response, mark site as bad
-                    site_has_empty_response = True
-                    logger.warning(f"Site {site_url} returned empty response {empty_response_retries} times, marking as bad")
-                    add_bad_site(site_url, f"Empty response after {empty_response_retries} retries - no payment result")
-                    logger.info(f"Marked site as bad due to repeated empty responses: {site_url}")
+            site_url = sites_to_try.pop(0)
+            tried_sites.append(site_url)
+            
+            logger.info(f"Checking card on site: {site_url} (site attempt {site_attempt + 1}/{max_site_retries})")
+            
+            # Retry loop for empty responses on the same site
+            empty_retry_count = 0
+            site_has_empty_response = False
+            
+            for empty_retry in range(empty_response_retries):
+                checker = AsyncCardChecker(card_details, site_url, proxy, _session)
+                result = await checker.check()
+                last_result = result
+                
+                # Check if response indicates a bad site (out of stock, cannot find product ID, etc.)
+                # If bad site detected, the site is already moved to badsites.txt by the checker
+                # Don't send response, just retry with a different site
+                if _is_bad_site_response(result):
+                    logger.warning(f"Bad site detected: {site_url} - {result.get('message', 'Unknown')}. Retrying with different site...")
                     break  # Exit empty retry loop, try next site
-            else:
-                # Got a valid response (not empty, not bad site), return it
-                return result.get('response_text', f"ERROR: {result.get('message', 'Unknown error')}")
+                
+                # Check if response is empty or has no meaningful message
+                if _is_empty_response(result):
+                    empty_retry_count += 1
+                    logger.warning(f"Empty response from site {site_url}, retry {empty_retry_count}/{empty_response_retries}")
+                    
+                    if empty_retry_count < empty_response_retries:
+                        # Wait a bit before retrying on same site
+                        await asyncio.sleep(0.5)
+                        continue  # Retry on same site
+                    else:
+                        # After 3 retries with empty response, mark site as bad
+                        site_has_empty_response = True
+                        logger.warning(f"Site {site_url} returned empty response {empty_response_retries} times, marking as bad")
+                        add_bad_site(site_url, f"Empty response after {empty_response_retries} retries - no payment result")
+                        logger.info(f"Marked site as bad due to repeated empty responses: {site_url}")
+                        break  # Exit empty retry loop, try next site
+                else:
+                    # Got a valid response (not empty, not bad site), return it
+                    response_text = result.get('response_text', f"ERROR: {result.get('message', 'Unknown error')}")
+                    # Track successful request
+                    check_elapsed = time.time() - check_start_time
+                    is_approved = ("CCN" in response_text and "✅" in response_text) or ("CVV" in response_text and "✅" in response_text)
+                    if GATEWAY_STATS_AVAILABLE:
+                        track_request_end('pp', success=is_approved or "❌" not in response_text[:20], response_time=check_elapsed)
+                    return response_text
+            
+            # If we got here due to bad site or empty response after retries, continue to next site
+            if _is_bad_site_response(result) or site_has_empty_response:
+                continue  # Try next site
         
-        # If we got here due to bad site or empty response after retries, continue to next site
-        if _is_bad_site_response(result) or site_has_empty_response:
-            continue  # Try next site
-    
-    # All retries exhausted - all sites were bad or returned empty responses
-    # Return a meaningful error message with BIN info
-    start_time = time.time()
-    bin_info = await BinChecker.check(card_details.split('|')[0][:6], UserAgentGenerator.get())
-    elapsed_time = time.time() - start_time + (last_result.get('elapsed_time', 0) if last_result else 0)
-    
-    error_response = f"""ERROR ❌
+        # All retries exhausted - all sites were bad or returned empty responses
+        # Return a meaningful error message with BIN info
+        start_time = time.time()
+        bin_info = await BinChecker.check(card_details.split('|')[0][:6], UserAgentGenerator.get())
+        elapsed_time = time.time() - start_time + (last_result.get('elapsed_time', 0) if last_result else 0)
+        
+        error_response = f"""ERROR ❌
 
 𝗖𝗖 ⇾ {card_details}
 𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Ppcp-gateway
@@ -1181,8 +1210,21 @@ async def check_single_card(card_details: str, site_urls: List[str], proxy: Opti
 𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀 [ 0 ]
 
 𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB"""
+        
+        # Track failed request (all sites unavailable)
+        check_elapsed = time.time() - check_start_time
+        if GATEWAY_STATS_AVAILABLE:
+            track_request_end('pp', success=False, response_time=check_elapsed)
+        
+        return error_response
     
-    return error_response
+    except Exception as e:
+        # Track failed request on exception
+        check_elapsed = time.time() - check_start_time
+        if GATEWAY_STATS_AVAILABLE:
+            track_request_end('pp', success=False, response_time=check_elapsed)
+        raise
+        raise
 
 
 async def check_multiple_cards(card_list: List[str], site_list: List[str], max_concurrent: int = 10) -> List[str]:

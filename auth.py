@@ -22,7 +22,19 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 
 # Import ppcp module for /pp command
 sys.path.append(os.path.join(os.path.dirname(__file__), 'ppcp'))
+sys.path.append(os.path.join(os.path.dirname(__file__), 'core'))
 import asyncio
+
+# Import gateway stats tracker
+try:
+    from core.gateway_stats import (
+        get_gateway_stats, track_request_start, track_request_end,
+        get_formatted_gateway_stats, GatewayRequestTracker
+    )
+    GATEWAY_STATS_AVAILABLE = True
+except ImportError:
+    GATEWAY_STATS_AVAILABLE = False
+    print("Warning: Gateway stats module not available")
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -1142,6 +1154,10 @@ def check_card(cc_line):
     """Check card with thread-safe resource selection"""
     from datetime import datetime
     start_time = time.time()
+    
+    # Track gateway usage
+    if GATEWAY_STATS_AVAILABLE:
+        track_request_start('b3')
 
     try:
         # Select random site folder (thread-safe, per-request)
@@ -1277,9 +1293,17 @@ def check_card(cc_line):
 
 𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB
 """
+        # Track successful request
+        if GATEWAY_STATS_AVAILABLE:
+            track_request_end('b3', success=True, response_time=elapsed_time)
+        
         return response_text, None, None
 
     except Exception as e:
+        # Track failed request
+        elapsed_time = time.time() - start_time
+        if GATEWAY_STATS_AVAILABLE:
+            track_request_end('b3', success=False, response_time=elapsed_time)
         return f"❌ Error: {str(e)}", None, None
 
 
@@ -1828,6 +1852,11 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         checking_msg = await update.message.reply_text("⏳ Checking Please Wait...")
 
         try:
+            # Track gateway usage start
+            pp_check_start = time.time()
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_start('pp')
+            
             # Check the single card using async ppcp gateway
             # Load sites from sites.txt file
             sites = []
@@ -1842,9 +1871,17 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not sites:
                 result = "❌ No sites found!"
+                pp_success = False
             else:
                 from ppcp.async_ppcpgatewaycvv import check_single_card
                 result = await check_single_card(normalized_cards[0], sites)
+                # Determine success based on result
+                pp_success = ("CCN" in result and "✅" in result) or ("CVV" in result and "✅" in result)
+            
+            # Track gateway usage end
+            pp_check_elapsed = time.time() - pp_check_start
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_end('pp', success=pp_success or "❌" not in result[:20], response_time=pp_check_elapsed)
 
             # Edit the message with the result
             await checking_msg.edit_text(result)
@@ -1853,6 +1890,10 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await forward_to_channel(context, normalized_cards[0], result, gateway='pp')
 
         except Exception as e:
+            # Track failed request
+            pp_check_elapsed = time.time() - pp_check_start if 'pp_check_start' in locals() else 0
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_end('pp', success=False, response_time=pp_check_elapsed)
             error_message = f"❌ Error checking card: {str(e)}"
             await checking_msg.edit_text(error_message)
             print(f"Error in /pp command: {str(e)}")
@@ -1913,13 +1954,20 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 completed_count += 1
                 
-                # Count approved/declined
-                if ("CCN" in result and "✅" in result) or ("CVV" in result and "✅" in result):
+                # Count approved/declined and track gateway stats
+                is_approved = ("CCN" in result and "✅" in result) or ("CVV" in result and "✅" in result)
+                if is_approved:
                     approved_count += 1
                     # Forward to channel if approved
                     await forward_to_channel(context, card, result, gateway='pp')
                 else:
                     declined_count += 1
+                
+                # Track gateway usage for each card in mass check
+                if GATEWAY_STATS_AVAILABLE:
+                    # Note: start/end tracking is handled in the async_ppcpgatewaycvv module
+                    # This is just for counting purposes
+                    pass
 
                 # Send result IMMEDIATELY
                 card_result = f"Card {completed_count}/{total_cards}:\n{result}"
@@ -2059,10 +2107,20 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         checking_msg = await update.message.reply_text("⏳ Checking Please Wait... (PayPal Pro)")
 
         try:
+            # Track gateway usage start
+            check_start_time = time.time()
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_start('ppro')
+            
             # Check the single card using PayPal Pro gateway (run in executor to not block)
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, lambda: paypalpro.check_card(normalized_cards[0], sites=sites))
             formatted_result = paypalpro.format_result(result)
+            
+            # Track gateway usage end
+            check_elapsed = time.time() - check_start_time
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_end('ppro', success=result.get('approved', False) or result.get('status') != 'ERROR', response_time=check_elapsed)
 
             # Edit the message with the result
             await checking_msg.edit_text(formatted_result)
@@ -2072,6 +2130,10 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await forward_to_channel(context, normalized_cards[0], formatted_result, gateway='ppro')
 
         except Exception as e:
+            # Track failed request
+            check_elapsed = time.time() - check_start_time if 'check_start_time' in locals() else 0
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_end('ppro', success=False, response_time=check_elapsed)
             error_message = f"❌ Error checking card: {str(e)}"
             await checking_msg.edit_text(error_message)
             print(f"Error in /pro command: {str(e)}")
@@ -2126,10 +2188,20 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         user_rate_limit[user_id] = time.time()
 
                 try:
+                    # Track gateway usage start
+                    card_check_start = time.time()
+                    if GATEWAY_STATS_AVAILABLE:
+                        track_request_start('ppro')
+                    
                     # Check the card using run_in_executor to not block event loop
                     loop = asyncio.get_event_loop()
                     result = await loop.run_in_executor(None, lambda c=card: paypalpro.check_card(c, sites=sites))
                     formatted_result = paypalpro.format_result(result)
+                    
+                    # Track gateway usage end
+                    card_check_elapsed = time.time() - card_check_start
+                    if GATEWAY_STATS_AVAILABLE:
+                        track_request_end('ppro', success=result.get('approved', False) or result.get('status') != 'ERROR', response_time=card_check_elapsed)
 
                     # Count approved/declined
                     if result.get('approved', False):
@@ -2144,6 +2216,10 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(card_result)
 
                 except Exception as e:
+                    # Track failed request
+                    card_check_elapsed = time.time() - card_check_start if 'card_check_start' in locals() else 0
+                    if GATEWAY_STATS_AVAILABLE:
+                        track_request_end('ppro', success=False, response_time=card_check_elapsed)
                     declined_count += 1
                     await update.message.reply_text(f"Card {idx}/{total_cards}:\n❌ Error: {str(e)}")
 
@@ -2308,14 +2384,64 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         mods_db = load_mods_db()
         mods_count = len(mods_db)
         
+        # Get active mass checks count
+        with active_mass_checks_lock:
+            active_mass_count = len(active_mass_checks)
+        
         stats_text = f"📊 *Bot Statistics*\n\n"
         stats_text += f"👥 Total Users: {total_users}\n"
         stats_text += f"✅ Active Users: {active_users}\n"
         stats_text += f"❌ Expired Users: {expired_users}\n"
         stats_text += f"👮 Mods: {mods_count}\n"
-        stats_text += f"⏱️ Check Interval: {RATE_LIMIT_SECONDS}s"
+        stats_text += f"⏱️ Check Interval: {RATE_LIMIT_SECONDS}s\n"
+        stats_text += f"🔄 Active Mass Checks: {active_mass_count}/{MAX_TOTAL_CONCURRENT_MASS_CHECKS}"
         
-        await query.edit_message_text(stats_text, parse_mode='Markdown')
+        keyboard = [
+            [InlineKeyboardButton("📈 Gateway Usage Stats", callback_data='admin_gateway_stats')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='admin_back_main')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(stats_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    elif action == 'admin_gateway_stats':
+        # Show gateway usage statistics
+        if GATEWAY_STATS_AVAILABLE:
+            stats_text = get_formatted_gateway_stats()
+        else:
+            stats_text = "📊 *Gateway Usage Statistics*\n\n⚠️ Gateway stats module not available."
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Refresh", callback_data='admin_gateway_stats')],
+            [InlineKeyboardButton("🗑️ Reset Stats", callback_data='admin_reset_gateway_stats')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='admin_stats')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(stats_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    elif action == 'admin_reset_gateway_stats':
+        # Reset gateway statistics
+        if GATEWAY_STATS_AVAILABLE:
+            get_gateway_stats().reset_stats()
+            await query.answer("✅ Gateway stats reset successfully!", show_alert=True)
+        else:
+            await query.answer("⚠️ Gateway stats module not available.", show_alert=True)
+        
+        # Refresh the stats view
+        if GATEWAY_STATS_AVAILABLE:
+            stats_text = get_formatted_gateway_stats()
+        else:
+            stats_text = "📊 *Gateway Usage Statistics*\n\n⚠️ Gateway stats module not available."
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Refresh", callback_data='admin_gateway_stats')],
+            [InlineKeyboardButton("🗑️ Reset Stats", callback_data='admin_reset_gateway_stats')],
+            [InlineKeyboardButton("⬅️ Back", callback_data='admin_stats')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(stats_text, reply_markup=reply_markup, parse_mode='Markdown')
     
     elif action == 'admin_remove':
         await query.edit_message_text(
