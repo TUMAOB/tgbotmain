@@ -50,13 +50,51 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Import subprocess for auto-restart functionality
 import subprocess
 
-def auto_restart_bot():
+def save_restart_state(updated_files=None):
+    """Save restart state to notify admin after restart"""
+    lock = SoftFileLock(RESTART_STATE_LOCK_FILE, timeout=10)
+    with lock:
+        state = {
+            'pending_notification': True,
+            'admin_id': ADMIN_ID,
+            'updated_files': updated_files or [],
+            'restart_time': datetime.now().isoformat()
+        }
+        with open(RESTART_STATE_FILE, 'w') as f:
+            json.dump(state, f, indent=2)
+
+def load_restart_state():
+    """Load restart state from file"""
+    lock = SoftFileLock(RESTART_STATE_LOCK_FILE, timeout=10)
+    with lock:
+        if os.path.exists(RESTART_STATE_FILE):
+            try:
+                with open(RESTART_STATE_FILE, 'r') as f:
+                    return json.load(f)
+            except:
+                return None
+        return None
+
+def clear_restart_state():
+    """Clear restart state after notification is sent"""
+    lock = SoftFileLock(RESTART_STATE_LOCK_FILE, timeout=10)
+    with lock:
+        if os.path.exists(RESTART_STATE_FILE):
+            os.remove(RESTART_STATE_FILE)
+
+def auto_restart_bot(updated_files=None):
     """
     Automatically restart the bot by spawning a new process and exiting the current one.
     This function does not return - it exits the current process after starting the new one.
+    
+    Args:
+        updated_files: List of files that were updated (for notification after restart)
     """
     import sys
     import os
+    
+    # Save restart state for notification after restart
+    save_restart_state(updated_files)
     
     # Get the current script path
     script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'run_production.py')
@@ -86,6 +124,10 @@ AUTO_SCAN_SETTINGS_LOCK_FILE = 'auto_scan_settings.json.lock'
 # PPCP auto-remove settings file
 PPCP_AUTO_REMOVE_SETTINGS_FILE = 'ppcp_auto_remove_settings.json'
 PPCP_AUTO_REMOVE_SETTINGS_LOCK_FILE = 'ppcp_auto_remove_settings.json.lock'
+
+# Restart state file (for sending confirmation after restart)
+RESTART_STATE_FILE = 'restart_state.json'
+RESTART_STATE_LOCK_FILE = 'restart_state.json.lock'
 
 # Mass check settings file (enable/disable mass checking per gateway)
 MASS_SETTINGS_FILE = 'mass_settings.json'
@@ -5677,9 +5719,9 @@ async def system_message_handler(update: Update, context: ContextTypes.DEFAULT_T
                 parse_mode='Markdown'
             )
             
-            # Auto-restart the bot
+            # Auto-restart the bot with updated files info
             await asyncio.sleep(1)  # Brief delay to ensure message is sent
-            auto_restart_bot()
+            auto_restart_bot(updated_files)
         else:
             await status_msg.edit_text(
                 f"❌ *Update Failed*\n\n{message}\n\n"
@@ -5795,9 +5837,9 @@ async def system_document_handler(update: Update, context: ContextTypes.DEFAULT_
                 parse_mode='Markdown'
             )
             
-            # Auto-restart the bot
+            # Auto-restart the bot with updated files info
             await asyncio.sleep(1)  # Brief delay to ensure message is sent
-            auto_restart_bot()
+            auto_restart_bot(updated_files)
         else:
             await status_msg.edit_text(
                 f"❌ *Update Failed*\n\n{message}\n\n"
@@ -5810,6 +5852,71 @@ async def system_document_handler(update: Update, context: ContextTypes.DEFAULT_
             f"❌ *Error*\n\n{str(e)}",
             parse_mode='Markdown'
         )
+
+
+async def send_restart_confirmation(application):
+    """Send restart confirmation and system menu to admin after bot restart"""
+    restart_state = load_restart_state()
+    
+    if not restart_state or not restart_state.get('pending_notification'):
+        return
+    
+    admin_id = restart_state.get('admin_id', ADMIN_ID)
+    updated_files = restart_state.get('updated_files', [])
+    
+    try:
+        # Build the files list for display
+        if updated_files:
+            files_list = '\n'.join([f"• {f}" for f in updated_files[:15]])
+            if len(updated_files) > 15:
+                files_list += f"\n... and {len(updated_files) - 15} more"
+            files_info = f"\n\n📦 *Updated {len(updated_files)} files:*\n{files_list}"
+        else:
+            files_info = ""
+        
+        # Send confirmation message
+        await application.bot.send_message(
+            chat_id=admin_id,
+            text=f"✅ *System Restarted Successfully*{files_info}\n\n"
+                 f"🤖 Bot is now running with the latest updates.",
+            parse_mode='Markdown'
+        )
+        
+        # Get system info for the menu
+        if SYSTEM_MANAGER_AVAILABLE:
+            sys_info = system_manager.get_system_info()
+            
+            keyboard = [
+                [InlineKeyboardButton("💾 Create Backup", callback_data='system_backup')],
+                [InlineKeyboardButton("📂 View Backups", callback_data='system_view_backups')],
+                [InlineKeyboardButton("♻️ Restore Backup", callback_data='system_restore')],
+                [InlineKeyboardButton("🔄 Update System", callback_data='system_update')],
+                [InlineKeyboardButton("📊 System Info", callback_data='system_info')],
+                [InlineKeyboardButton("❌ Close", callback_data='system_close')],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await application.bot.send_message(
+                chat_id=admin_id,
+                text="🔧 *System Management*\n\n"
+                     f"📁 Database Files: {len(sys_info['database_files'])}\n"
+                     f"🌐 Gateway Sites: {len(sys_info['gateway_sites'])}\n"
+                     f"🏪 B3 Sites: {len(sys_info['b3_sites'])}\n"
+                     f"📦 Core Modules: {len(sys_info['core_modules'])}\n"
+                     f"💾 Backups: {sys_info['backup_count']}\n\n"
+                     "Select an option:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        
+        print("✅ Restart confirmation sent to admin")
+        
+    except Exception as e:
+        print(f"⚠️ Failed to send restart confirmation: {str(e)}")
+    
+    finally:
+        # Clear the restart state
+        clear_restart_state()
 
 
 def main():
@@ -5883,6 +5990,13 @@ def main():
     application.add_error_handler(error_handler)
     
     print("✅ Handlers registered successfully")
+    
+    # Check for pending restart notification and send it on startup
+    async def post_init(app):
+        """Called after the application is initialized"""
+        await send_restart_confirmation(app)
+    
+    application.post_init = post_init
     
     # Start the bot
     print("✅ Bot is running...")
