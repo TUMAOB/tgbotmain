@@ -5754,6 +5754,112 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
                 )
                 return
     
+    # Check for pending system update actions (GitHub URL)
+    with pending_system_actions_lock:
+        if user_id in pending_system_actions:
+            pending_action = pending_system_actions[user_id]
+            action_type = pending_action.get('action')
+            
+            if action_type == 'update_github':
+                # Remove pending action
+                del pending_system_actions[user_id]
+                
+                # Process GitHub URL
+                github_url = message_text.strip()
+                
+                # Validate URL
+                if not github_url.startswith('https://github.com/'):
+                    await update.message.reply_text(
+                        "❌ Invalid GitHub URL. Please provide a valid GitHub repository URL.\n\n"
+                        "Example: `https://github.com/user/repo`",
+                        parse_mode='Markdown'
+                    )
+                    return
+                
+                if not SYSTEM_MANAGER_AVAILABLE:
+                    await update.message.reply_text(
+                        "❌ System manager module is not available.",
+                        parse_mode='Markdown'
+                    )
+                    return
+                
+                # Send processing message
+                status_msg = await update.message.reply_text(
+                    "⏳ *Downloading repository...*\n\nPlease wait...",
+                    parse_mode='Markdown'
+                )
+                
+                try:
+                    # Run download in thread executor to avoid blocking the event loop
+                    loop = asyncio.get_event_loop()
+                    
+                    # Download repository (run in executor to avoid blocking)
+                    await status_msg.edit_text(
+                        "⏳ *System Update in Progress*\n\n"
+                        "Progress: ██░░░░░░░░ 20%\n"
+                        "Status: Downloading repository...",
+                        parse_mode='Markdown'
+                    )
+                    
+                    success, message, source_dir = await loop.run_in_executor(
+                        None,
+                        lambda: system_manager.download_github_repo(github_url, progress_callback=None)
+                    )
+                    
+                    if not success:
+                        await status_msg.edit_text(
+                            f"❌ *Download Failed*\n\n{escape_markdown(message)}",
+                            parse_mode='Markdown'
+                        )
+                        return
+                    
+                    # Apply update (run in executor to avoid blocking)
+                    await status_msg.edit_text(
+                        "⏳ *System Update in Progress*\n\n"
+                        "Progress: █████░░░░░ 50%\n"
+                        "Status: Creating backup and applying update...",
+                        parse_mode='Markdown'
+                    )
+                    
+                    success, message, updated_files = await loop.run_in_executor(
+                        None,
+                        lambda: system_manager.apply_system_update(source_dir, create_backup=True, progress_callback=None)
+                    )
+                    
+                    # Clean up temp directory
+                    system_manager.cleanup_temp_dir(source_dir)
+                    
+                    if success:
+                        # Escape file names to prevent Markdown parsing errors
+                        files_list = '\n'.join([f"• {escape_markdown(f)}" for f in updated_files[:10]])
+                        if len(updated_files) > 10:
+                            files_list += f"\n... and {len(updated_files) - 10} more"
+                        
+                        await status_msg.edit_text(
+                            f"✅ *System Updated Successfully*\n\n"
+                            f"📦 Updated {len(updated_files)} files:\n{files_list}\n\n"
+                            f"🔄 *Restarting bot automatically...*",
+                            parse_mode='Markdown'
+                        )
+                        
+                        # Auto-restart the bot with updated files info
+                        await asyncio.sleep(1)  # Brief delay to ensure message is sent
+                        auto_restart_bot(updated_files)
+                    else:
+                        await status_msg.edit_text(
+                            f"❌ *Update Failed*\n\n{escape_markdown(message)}\n\n"
+                            "A backup was created before the update attempt.",
+                            parse_mode='Markdown'
+                        )
+                
+                except Exception as e:
+                    await status_msg.edit_text(
+                        f"❌ *Error*\n\n{escape_markdown(str(e))}",
+                        parse_mode='Markdown'
+                    )
+                
+                return
+    
     # Check if there's a pending file edit (thread-safe)
     with pending_file_edits_lock:
         if user_id not in pending_file_edits:
@@ -6494,123 +6600,6 @@ async def system_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         )
 
 
-async def system_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages for system update (GitHub URL)"""
-    user_id = update.effective_user.id
-    
-    # Only admin can use system management
-    if user_id != ADMIN_ID:
-        return
-    
-    if not SYSTEM_MANAGER_AVAILABLE:
-        return
-    
-    message_text = update.message.text
-    if not message_text:
-        return
-    
-    # Check for pending system actions
-    with pending_system_actions_lock:
-        if user_id not in pending_system_actions:
-            return
-        
-        pending_action = pending_system_actions[user_id]
-        action_type = pending_action.get('action')
-        
-        if action_type != 'update_github':
-            return
-        
-        # Remove pending action
-        del pending_system_actions[user_id]
-    
-    # Process GitHub URL
-    github_url = message_text.strip()
-    
-    # Validate URL
-    if not github_url.startswith('https://github.com/'):
-        await update.message.reply_text(
-            "❌ Invalid GitHub URL. Please provide a valid GitHub repository URL.\n\n"
-            "Example: `https://github.com/user/repo`",
-            parse_mode='Markdown'
-        )
-        return
-    
-    # Send processing message
-    status_msg = await update.message.reply_text(
-        "⏳ *Downloading repository...*\n\nPlease wait...",
-        parse_mode='Markdown'
-    )
-    
-    try:
-        # Run download in thread executor to avoid blocking the event loop
-        loop = asyncio.get_event_loop()
-        
-        # Download repository (run in executor to avoid blocking)
-        await status_msg.edit_text(
-            "⏳ *System Update in Progress*\n\n"
-            "Progress: ██░░░░░░░░ 20%\n"
-            "Status: Downloading repository...",
-            parse_mode='Markdown'
-        )
-        
-        success, message, source_dir = await loop.run_in_executor(
-            None,
-            lambda: system_manager.download_github_repo(github_url, progress_callback=None)
-        )
-        
-        if not success:
-            await status_msg.edit_text(
-                f"❌ *Download Failed*\n\n{message}",
-                parse_mode='Markdown'
-            )
-            return
-        
-        # Apply update (run in executor to avoid blocking)
-        await status_msg.edit_text(
-            "⏳ *System Update in Progress*\n\n"
-            "Progress: █████░░░░░ 50%\n"
-            "Status: Creating backup and applying update...",
-            parse_mode='Markdown'
-        )
-        
-        success, message, updated_files = await loop.run_in_executor(
-            None,
-            lambda: system_manager.apply_system_update(source_dir, create_backup=True, progress_callback=None)
-        )
-        
-        # Clean up temp directory
-        system_manager.cleanup_temp_dir(source_dir)
-        
-        if success:
-            # Escape file names to prevent Markdown parsing errors
-            files_list = '\n'.join([f"• {escape_markdown(f)}" for f in updated_files[:10]])
-            if len(updated_files) > 10:
-                files_list += f"\n... and {len(updated_files) - 10} more"
-            
-            await status_msg.edit_text(
-                f"✅ *System Updated Successfully*\n\n"
-                f"📦 Updated {len(updated_files)} files:\n{files_list}\n\n"
-                f"🔄 *Restarting bot automatically...*",
-                parse_mode='Markdown'
-            )
-            
-            # Auto-restart the bot with updated files info
-            await asyncio.sleep(1)  # Brief delay to ensure message is sent
-            auto_restart_bot(updated_files)
-        else:
-            await status_msg.edit_text(
-                f"❌ *Update Failed*\n\n{escape_markdown(message)}\n\n"
-                "A backup was created before the update attempt.",
-                parse_mode='Markdown'
-            )
-    
-    except Exception as e:
-        await status_msg.edit_text(
-            f"❌ *Error*\n\n{escape_markdown(str(e))}",
-            parse_mode='Markdown'
-        )
-
-
 async def system_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming ZIP files for system update"""
     user_id = update.effective_user.id
@@ -6890,11 +6879,8 @@ def main():
     application.add_handler(CallbackQueryHandler(mods_callback_handler, pattern=r'^mods_'))
     application.add_handler(CallbackQueryHandler(system_callback_handler, pattern=r'^system_'))
     
-    # Add message handler for file editing (must be before catch-all)
+    # Add message handler for file editing and system update (GitHub URL) - handles all text messages
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, file_edit_message_handler))
-    
-    # Add message handler for system update (GitHub URL)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, system_message_handler))
     
     # Add document handler for system update (ZIP file)
     application.add_handler(MessageHandler(filters.Document.ALL, system_document_handler))
