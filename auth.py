@@ -2821,9 +2821,12 @@ async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ No Stripe sites configured! Please add sites via /admin > Settings > Stripe Sites")
         return
 
-    # Import Stripe checker
-    sys.path.append(os.path.join(os.path.dirname(__file__), 'stripe'))
-    from stripe import allstripecvv
+    # Import Stripe checker using importlib to avoid conflict with stripe package
+    import importlib.util
+    stripe_checker_path = os.path.join(os.path.dirname(__file__), 'stripe', 'allstripecvv.py')
+    spec = importlib.util.spec_from_file_location("allstripecvv", stripe_checker_path)
+    allstripecvv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(allstripecvv)
     sites_str = ','.join(sites)
 
     # Handle single card vs mass checking
