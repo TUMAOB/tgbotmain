@@ -727,7 +727,8 @@ def load_mass_settings():
         return {
             'b3': True,   # Braintree Auth
             'pp': True,   # PPCP
-            'ppro': True  # PayPal Pro
+            'ppro': True, # PayPal Pro
+            'st': True    # Stripe
         }
 
 def save_mass_settings(settings):
@@ -768,7 +769,8 @@ def load_gateway_interval_settings():
         return {
             'b3': 1,    # Braintree Auth
             'pp': 1,    # PPCP
-            'ppro': 1   # PayPal Pro
+            'ppro': 1,  # PayPal Pro
+            'st': 1     # Stripe
         }
 
 def save_gateway_interval_settings(settings):
@@ -1732,7 +1734,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check which mass check gateways are disabled
     mass_settings = load_mass_settings()
     disabled_gateways = []
-    gateway_names = {'b3': 'B3 (Braintree)', 'pp': 'PP (PPCP)', 'ppro': 'PPRO (PayPal Pro)'}
+    gateway_names = {'b3': 'B3 (Braintree)', 'pp': 'PP (PPCP)', 'ppro': 'PPRO (PayPal Pro)', 'st': 'ST (Stripe)'}
     for gw, name in gateway_names.items():
         if not mass_settings.get(gw, True):
             disabled_gateways.append(name)
@@ -2557,167 +2559,103 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             unregister_mass_check(user_id)
 
 
-async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /st command for Stripe CVV card checking with rate limiting"""
-    user_id = update.effective_user.id
-    is_admin = user_id == ADMIN_ID
-
-    # Check if user is admin or approved
-    if not is_admin and not is_user_approved(user_id):
-        await update.message.reply_text(
-            "❌ You don't have access to use this bot.\n"
-            f"Your User ID: `{user_id}`\n\n"
-            "Please contact @TUMAOB for approval.",
-            parse_mode='Markdown'
-        )
-        return
-
-    # Rate limiting check (thread-safe)
-    if not is_admin:
-        with user_rate_limit_lock:
-            current_time = time.time()
-            last_check_time = user_rate_limit.get(user_id, 0)
-            time_since_last_check = current_time - last_check_time
-
-            if time_since_last_check < RATE_LIMIT_SECONDS:
-                wait_time = RATE_LIMIT_SECONDS - time_since_last_check
-                await update.message.reply_text(
-                    f"⏳ Please wait {wait_time:.1f} seconds before checking another card.\n"
-                    "This prevents overloading the system."
-                )
-                return
-
-            # Update last check time
-            user_rate_limit[user_id] = current_time
-
-    # Check if card details are provided
-    if not context.args:
-        await update.message.reply_text(
-            "❌ Please provide card details.\n\n"
-            "Format: /st number|mm|yy|cvv\n"
-            "Example: /st 4315037547717888|10|28|852"
-        )
-        return
-
-    card_details = ' '.join(context.args)
-
-    # Validate card format
-    if card_details.count('|') != 3:
-        await update.message.reply_text(
-            "❌ Invalid card format.\n\n"
-            "Format: /st number|mm|yy|cvv\n"
-            "Example: /st 4315037547717888|10|28|852"
-        )
-        return
-
-    # Send "Checking Please Wait" message
-    checking_msg = await update.message.reply_text("⏳ Checking Please Wait...")
-
-    try:
-        # Load Stripe sites
-        sites = load_stripe_sites()
-        
-        if not sites:
-            await checking_msg.edit_text("❌ No Stripe sites configured! Please add sites to stripe/sites.txt")
-            return
-
-        # Import and use the Stripe CVV checker
-        sys.path.append(os.path.join(os.path.dirname(__file__), 'stripe'))
-        from stripe import allstripecvv
-        
-        # Convert sites list to comma-separated string
-        sites_str = ','.join(sites)
-        
-        # Track start time
-        start_time = time.time()
-        
-        # Run the card check in executor to not block
-        loop = asyncio.get_event_loop()
-        raw_result = await loop.run_in_executor(
-            None, 
-            lambda: allstripecvv.process_card(card_details, sites_str)
-        )
-        
-        elapsed_time = time.time() - start_time
-        
-        # Parse card details
-        parts = card_details.strip().split('|')
+def normalize_stripe_card_format(card_input):
+    """Normalize card format for Stripe checker"""
+    card_input = card_input.strip()
+    
+    # Try pipe-separated format: number|mm|yy|cvv
+    if '|' in card_input:
+        parts = card_input.split('|')
+        if len(parts) == 4:
+            return card_input
+    
+    # Try space-separated format: number mmyy cvv
+    parts = card_input.split()
+    if len(parts) == 3:
         cc = parts[0]
-        mm = parts[1]
-        yy = parts[2] if len(parts[2]) == 4 else f"20{parts[2]}"
-        cvv = parts[3]
-        
-        # Get BIN info
-        bin_info = get_bin_info(cc[:6]) or default_bin_info()
-        
-        # Parse the raw result to extract response and price
-        response_text = ""
-        price = ""
-        
-        # Extract price from result
-        if "AMOUNT:" in raw_result:
-            try:
-                price_match = re.search(r'AMOUNT:([^\]]+)', raw_result)
-                if price_match:
-                    price = price_match.group(1).strip()
-            except:
-                price = ""
-        
-        # Determine status and format response
-        is_cvv = False
-        is_ccn = False
-        is_declined = False
-        reason = ""
-        
-        if "#CVV" in raw_result:
-            is_cvv = True
-            # Extract reason
-            if "Insufficient Funds" in raw_result:
-                reason = "Insufficient Funds ✅"
-            elif "CHARGED" in raw_result:
-                reason = "CHARGED CVV ✅"
+        mmyy = parts[1]
+        cvv = parts[2]
+        if len(mmyy) == 4:
+            mm = mmyy[:2]
+            yy = mmyy[2:]
+            return f"{cc}|{mm}|{yy}|{cvv}"
+    
+    return None
+
+
+def format_stripe_result(raw_result, card_details, elapsed_time):
+    """Format Stripe check result for display"""
+    # Parse card details
+    parts = card_details.strip().split('|')
+    cc = parts[0]
+    mm = parts[1]
+    yy = parts[2] if len(parts[2]) == 4 else f"20{parts[2]}"
+    cvv = parts[3]
+    
+    # Get BIN info
+    bin_info = get_bin_info(cc[:6]) or default_bin_info()
+    
+    # Extract price from result
+    price = ""
+    if "AMOUNT:" in raw_result:
+        try:
+            price_match = re.search(r'AMOUNT:([^\]]+)', raw_result)
+            if price_match:
+                price = price_match.group(1).strip()
+        except:
+            price = ""
+    
+    # Determine status and format response
+    is_cvv = False
+    is_ccn = False
+    is_declined = False
+    reason = ""
+    
+    if "#CVV" in raw_result:
+        is_cvv = True
+        if "Insufficient Funds" in raw_result:
+            reason = "Insufficient Funds ✅"
+        elif "CHARGED" in raw_result:
+            reason = "CHARGED CVV ✅"
+        else:
+            reason = "CVV LIVE ✅"
+    elif "#CCN" in raw_result:
+        is_ccn = True
+        if "Security Code" in raw_result or "security code" in raw_result:
+            reason = "CCN LIVE (Security Code Incorrect) ✅"
+        elif "3ds" in raw_result.lower():
+            reason = "CCN LIVE (3DS Required) ✅"
+        else:
+            reason = "CCN LIVE ✅"
+    elif "#DEAD" in raw_result or "#ERROR" in raw_result:
+        is_declined = True
+        if "DECLINED" in raw_result:
+            reason = "DECLINED ❌"
+        elif "card was declined" in raw_result.lower():
+            reason = "Card Declined ❌"
+        elif "NONCE ERROR" in raw_result:
+            reason = "Nonce Error ❌"
+        elif "Payment processing failed" in raw_result:
+            reason = "Payment Processing Failed ❌"
+        else:
+            bracket_match = re.search(r'#(?:DEAD|ERROR)\s*\[([^\]]+)\]', raw_result)
+            if bracket_match:
+                reason = f"{bracket_match.group(1)} ❌"
             else:
-                reason = "CVV LIVE ✅"
-        elif "#CCN" in raw_result:
-            is_ccn = True
-            if "Security Code" in raw_result or "security code" in raw_result:
-                reason = "CCN LIVE (Security Code Incorrect) ✅"
-            elif "3ds" in raw_result.lower():
-                reason = "CCN LIVE (3DS Required) ✅"
-            else:
-                reason = "CCN LIVE ✅"
-        elif "#DEAD" in raw_result or "#ERROR" in raw_result:
-            is_declined = True
-            # Extract decline reason
-            if "DECLINED" in raw_result:
                 reason = "DECLINED ❌"
-            elif "card was declined" in raw_result.lower():
-                reason = "Card Declined ❌"
-            elif "NONCE ERROR" in raw_result:
-                reason = "Nonce Error ❌"
-            elif "Payment processing failed" in raw_result:
-                reason = "Payment Processing Failed ❌"
-            else:
-                # Try to extract the reason from brackets
-                bracket_match = re.search(r'#(?:DEAD|ERROR)\s*\[([^\]]+)\]', raw_result)
-                if bracket_match:
-                    reason = f"{bracket_match.group(1)} ❌"
-                else:
-                    reason = "DECLINED ❌"
-        else:
-            # Default to declined if unknown
-            is_declined = True
-            reason = "Unknown Response ❌"
-        
-        # Format the response according to user's requirements
-        if is_cvv or is_ccn:
-            status_emoji = "✅"
-            status_text = "CVV" if is_cvv else "CCN"
-        else:
-            status_emoji = "❌"
-            status_text = "DECLINED"
-        
-        formatted_result = f"""{status_text} {status_emoji}
+    else:
+        is_declined = True
+        reason = "Unknown Response ❌"
+    
+    # Format the response
+    if is_cvv or is_ccn:
+        status_emoji = "✅"
+        status_text = "CVV" if is_cvv else "CCN"
+    else:
+        status_emoji = "❌"
+        status_text = "DECLINED"
+    
+    formatted_result = f"""{status_text} {status_emoji}
 
 𝗖𝗖 ⇾ {cc}|{mm}|{yy}|{cvv}
 𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Stripe Charge {f'"{price}"' if price else ''}
@@ -2731,18 +2669,249 @@ async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB
 """
+    
+    return formatted_result, is_cvv or is_ccn
 
-        # Edit the message with the result
-        await checking_msg.edit_text(formatted_result)
 
-        # Forward to channel if approved (CVV or CCN)
-        if is_cvv or is_ccn:
-            await forward_to_channel(context, card_details, formatted_result, gateway='b3')
+async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /st command for Stripe CVV card checking with rate limiting and mass checking support - optimized for production"""
+    user_id = update.effective_user.id
+    is_admin = user_id == ADMIN_ID
 
-    except Exception as e:
-        error_message = f"❌ Error checking card: {str(e)}"
-        await checking_msg.edit_text(error_message)
-        print(f"Error in /st command: {str(e)}")
+    # Check if user is admin or approved
+    if not is_admin and not is_user_approved(user_id):
+        await update.message.reply_text(
+            "❌ You don't have access to use this bot.\n"
+            f"Your User ID: `{user_id}`\n\n"
+            "Please contact @TUMAOB for approval.",
+            parse_mode='Markdown'
+        )
+        return
+
+    # Check if card details are provided
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Please provide card details.\n\n"
+            "Single Card Format: /st number|mm|yy|cvv\n"
+            "Mass Check Format:\n/st 4315037547717888|10|28|852\n4386680119536105|01|2029|147\n4000223361770415|04|2029|639"
+        )
+        return
+
+    # Parse cards from message (support multiline input)
+    message_text = update.message.text
+    # Remove the /st command
+    cards_text = message_text.replace('/st', '', 1).strip()
+
+    # Split by newlines to get individual cards
+    card_lines = [line.strip() for line in cards_text.split('\n') if line.strip()]
+
+    if not card_lines:
+        await update.message.reply_text(
+            "❌ No valid cards found.\n\n"
+            "Format:\n"
+            "Single: /st number|mm|yy|cvv\n"
+            "Mass: /st 4315037547717888|10|28|852\n4386680119536105|01|2029|147"
+        )
+        return
+
+    # Normalize all cards
+    normalized_cards = []
+    for card_line in card_lines:
+        normalized = normalize_stripe_card_format(card_line)
+        if normalized:
+            normalized_cards.append(normalized)
+        else:
+            await update.message.reply_text(
+                f"❌ Invalid card format: {card_line}\n\n"
+                "Supported formats:\n"
+                "- number|mm|yy|cvv\n"
+                "- number mmyy cvv"
+            )
+            return
+
+    total_cards = len(normalized_cards)
+
+    # Load Stripe sites
+    sites = load_stripe_sites()
+    if not sites:
+        await update.message.reply_text("❌ No Stripe sites configured! Please add sites via /admin > Settings > Stripe Sites")
+        return
+
+    # Import Stripe checker
+    sys.path.append(os.path.join(os.path.dirname(__file__), 'stripe'))
+    from stripe import allstripecvv
+    sites_str = ','.join(sites)
+
+    # Handle single card vs mass checking
+    if total_cards == 1:
+        # Single card - apply rate limiting for non-admin users
+        if not is_admin:
+            with user_rate_limit_lock:
+                current_time = time.time()
+                last_check_time = user_rate_limit.get(user_id, 0)
+                time_since_last_check = current_time - last_check_time
+
+                if time_since_last_check < RATE_LIMIT_SECONDS:
+                    wait_time = RATE_LIMIT_SECONDS - time_since_last_check
+                    await update.message.reply_text(
+                        f"⏳ Please wait {wait_time:.1f} seconds before checking another card.\n"
+                        "This prevents overloading the system."
+                    )
+                    return
+
+                # Update last check time
+                user_rate_limit[user_id] = current_time
+
+        # Send "Checking Please Wait" message
+        checking_msg = await update.message.reply_text("⏳ Checking Please Wait... (Stripe)")
+
+        try:
+            # Track gateway usage start
+            check_start_time = time.time()
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_start('st')
+            
+            # Run the card check in executor to not block
+            loop = asyncio.get_event_loop()
+            raw_result = await loop.run_in_executor(
+                None, 
+                lambda: allstripecvv.process_card(normalized_cards[0], sites_str)
+            )
+            
+            elapsed_time = time.time() - check_start_time
+            
+            # Format result
+            formatted_result, is_approved = format_stripe_result(raw_result, normalized_cards[0], elapsed_time)
+            
+            # Track gateway usage end
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_end('st', success=is_approved or "❌" not in raw_result[:20], response_time=elapsed_time)
+
+            # Edit the message with the result
+            await checking_msg.edit_text(formatted_result)
+
+            # Forward to channel if approved (CVV or CCN)
+            if is_approved:
+                await forward_to_channel(context, normalized_cards[0], formatted_result, gateway='st')
+
+        except Exception as e:
+            # Track failed request
+            check_elapsed = time.time() - check_start_time if 'check_start_time' in locals() else 0
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_end('st', success=False, response_time=check_elapsed)
+            error_message = f"❌ Error checking card: {str(e)}"
+            await checking_msg.edit_text(error_message)
+            print(f"Error in /st command: {str(e)}")
+
+    else:
+        # Mass checking
+        # Check if mass checking is enabled for ST
+        if not is_mass_enabled('st'):
+            await update.message.reply_text(
+                "❌ Mass checking is currently disabled for ST (Stripe) gateway.\n\n"
+                "Please use /st for single card checking or contact admin.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Check if user can start a mass check (prevents single user from blocking system)
+        can_start, error_msg = can_start_mass_check(user_id)
+        if not can_start:
+            await update.message.reply_text(f"⏳ {error_msg}")
+            return
+
+        # Register this mass check
+        register_mass_check(user_id, total_cards)
+
+        # Send initial status message
+        status_msg = await update.message.reply_text(
+            f"⏳ Checking {total_cards} card(s) via Stripe...\n"
+            f"Progress: 0/{total_cards}"
+        )
+
+        try:
+            # Track progress
+            approved_count = 0
+            declined_count = 0
+
+            for idx, card in enumerate(normalized_cards, 1):
+                # Yield to event loop to allow other commands to process
+                await asyncio.sleep(0)
+                
+                # Rate limiting for non-admin users (between cards in mass check)
+                if not is_admin and idx > 1:
+                    # Use gateway-specific interval
+                    st_interval = get_gateway_interval('st')
+                    await asyncio.sleep(st_interval)
+
+                try:
+                    # Track gateway usage start
+                    card_check_start = time.time()
+                    if GATEWAY_STATS_AVAILABLE:
+                        track_request_start('st')
+                    
+                    # Check the card using run_in_executor to not block event loop
+                    loop = asyncio.get_event_loop()
+                    raw_result = await loop.run_in_executor(
+                        None, 
+                        lambda c=card: allstripecvv.process_card(c, sites_str)
+                    )
+                    
+                    card_check_elapsed = time.time() - card_check_start
+                    
+                    # Format result
+                    formatted_result, is_approved = format_stripe_result(raw_result, card, card_check_elapsed)
+                    
+                    # Track gateway usage end
+                    if GATEWAY_STATS_AVAILABLE:
+                        track_request_end('st', success=is_approved, response_time=card_check_elapsed)
+
+                    # Count approved/declined
+                    if is_approved:
+                        approved_count += 1
+                        # Forward to channel if approved
+                        await forward_to_channel(context, card, formatted_result, gateway='st')
+                    else:
+                        declined_count += 1
+
+                    # Send result immediately after checking
+                    card_result = f"Card {idx}/{total_cards}:\n{formatted_result}"
+                    await update.message.reply_text(card_result)
+
+                except Exception as e:
+                    # Track failed request
+                    card_check_elapsed = time.time() - card_check_start if 'card_check_start' in locals() else 0
+                    if GATEWAY_STATS_AVAILABLE:
+                        track_request_end('st', success=False, response_time=card_check_elapsed)
+                    declined_count += 1
+                    await update.message.reply_text(f"Card {idx}/{total_cards}:\n❌ Error: {str(e)}")
+
+                # Update progress
+                try:
+                    await status_msg.edit_text(
+                        f"⏳ Checking {total_cards} card(s) via Stripe...\n"
+                        f"Progress: {idx}/{total_cards}\n"
+                        f"✅ Approved: {approved_count} | ❌ Declined: {declined_count}"
+                    )
+                except:
+                    pass  # Ignore edit errors
+
+            # Send final summary
+            summary = f"📊 Stripe Mass Check Complete\n\n"
+            summary += f"Total Cards: {total_cards}\n"
+            summary += f"✅ Approved: {approved_count}\n"
+            summary += f"❌ Declined: {declined_count}"
+
+            await update.message.reply_text(summary)
+
+            # Delete the progress message
+            try:
+                await status_msg.delete()
+            except:
+                pass
+        finally:
+            # Always unregister the mass check when done
+            unregister_mass_check(user_id)
 
 
 async def admin_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2989,6 +3158,9 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 InlineKeyboardButton("💳 PayPal Pro Sites", callback_data='settings_paypalpro_sites'),
             ],
             [
+                InlineKeyboardButton("⚡ Stripe Sites", callback_data='settings_stripe_sites'),
+            ],
+            [
                 InlineKeyboardButton("📡 B3 Forwarders", callback_data='settings_forwarders_b3'),
             ],
             [
@@ -2996,6 +3168,9 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             ],
             [
                 InlineKeyboardButton("📡 PPRO Forwarders", callback_data='settings_forwarders_ppro'),
+            ],
+            [
+                InlineKeyboardButton("📡 ST Forwarders", callback_data='settings_forwarders_st'),
             ],
             [
                 InlineKeyboardButton("⏰ Auto-Scan Settings", callback_data='settings_auto_scan'),
@@ -3386,6 +3561,27 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
             parse_mode='Markdown'
         )
     
+    elif action == 'settings_stripe_sites':
+        # Show Stripe sites management
+        sites = load_stripe_sites()
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Add Site", callback_data='stripe_add_site')],
+        ]
+        
+        if sites:
+            keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='stripe_view_sites')])
+            keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='stripe_remove_site')])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"⚡ *Stripe Sites*\n\nTotal sites: {len(sites)}\n\nSelect an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
     elif action == 'settings_mass':
         # Show mass check settings
         settings = load_mass_settings()
@@ -3393,11 +3589,13 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         b3_status = "🟢 ON" if settings.get('b3', True) else "🔴 OFF"
         pp_status = "🟢 ON" if settings.get('pp', True) else "🔴 OFF"
         ppro_status = "🟢 ON" if settings.get('ppro', True) else "🔴 OFF"
+        st_status = "🟢 ON" if settings.get('st', True) else "🔴 OFF"
         
         keyboard = [
             [InlineKeyboardButton(f"B3 Mass: {b3_status}", callback_data='mass_toggle_b3')],
             [InlineKeyboardButton(f"PP Mass: {pp_status}", callback_data='mass_toggle_pp')],
             [InlineKeyboardButton(f"PPRO Mass: {ppro_status}", callback_data='mass_toggle_ppro')],
+            [InlineKeyboardButton(f"ST Mass: {st_status}", callback_data='mass_toggle_st')],
             [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -3407,7 +3605,8 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
             "Enable or disable mass checking for each gateway:\n\n"
             f"• B3 (Braintree Auth): {b3_status}\n"
             f"• PP (PPCP): {pp_status}\n"
-            f"• PPRO (PayPal Pro): {ppro_status}\n\n"
+            f"• PPRO (PayPal Pro): {ppro_status}\n"
+            f"• ST (Stripe): {st_status}\n\n"
             "Click to toggle:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -3420,11 +3619,13 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         b3_interval = intervals.get('b3', 1)
         pp_interval = intervals.get('pp', 1)
         ppro_interval = intervals.get('ppro', 1)
+        st_interval = intervals.get('st', 1)
         
         keyboard = [
             [InlineKeyboardButton(f"⏱️ B3: {b3_interval}s", callback_data='gwinterval_b3')],
             [InlineKeyboardButton(f"⏱️ PP: {pp_interval}s", callback_data='gwinterval_pp')],
             [InlineKeyboardButton(f"⏱️ PPRO: {ppro_interval}s", callback_data='gwinterval_ppro')],
+            [InlineKeyboardButton(f"⏱️ ST: {st_interval}s", callback_data='gwinterval_st')],
             [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -3434,7 +3635,8 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
             "Set the check interval (delay between checks) for each gateway:\n\n"
             f"• B3 (Braintree Auth): {b3_interval} second(s)\n"
             f"• PP (PPCP): {pp_interval} second(s)\n"
-            f"• PPRO (PayPal Pro): {ppro_interval} second(s)\n\n"
+            f"• PPRO (PayPal Pro): {ppro_interval} second(s)\n"
+            f"• ST (Stripe): {st_interval} second(s)\n\n"
             "Click a gateway to change its interval:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -3507,7 +3709,7 @@ async def forwarders_callback_handler(update: Update, context: ContextTypes.DEFA
     # Determine gateway from action
     if action.startswith('settings_forwarders_'):
         gateway = action.replace('settings_forwarders_', '')
-        gateway_names = {"b3": "B3", "pp": "PP", "ppro": "PPRO"}
+        gateway_names = {"b3": "B3", "pp": "PP", "ppro": "PPRO", "st": "ST"}
         gateway_name = gateway_names.get(gateway, gateway.upper())
         
         # Show forwarders list
@@ -4341,8 +4543,9 @@ async def mass_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         b3_status = "🟢 ON" if settings.get('b3', True) else "🔴 OFF"
         pp_status = "🟢 ON" if settings.get('pp', True) else "🔴 OFF"
         ppro_status = "🟢 ON" if settings.get('ppro', True) else "🔴 OFF"
+        st_status = "🟢 ON" if settings.get('st', True) else "🔴 OFF"
         
-        gateway_names = {'b3': 'B3', 'pp': 'PP', 'ppro': 'PPRO'}
+        gateway_names = {'b3': 'B3', 'pp': 'PP', 'ppro': 'PPRO', 'st': 'ST'}
         toggled_name = gateway_names.get(gateway, gateway.upper())
         toggled_status = "🟢 ON" if new_status else "🔴 OFF"
         
@@ -4350,6 +4553,7 @@ async def mass_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton(f"B3 Mass: {b3_status}", callback_data='mass_toggle_b3')],
             [InlineKeyboardButton(f"PP Mass: {pp_status}", callback_data='mass_toggle_pp')],
             [InlineKeyboardButton(f"PPRO Mass: {ppro_status}", callback_data='mass_toggle_ppro')],
+            [InlineKeyboardButton(f"ST Mass: {st_status}", callback_data='mass_toggle_st')],
             [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -4359,7 +4563,8 @@ async def mass_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             f"✅ {toggled_name} mass checking is now {toggled_status}\n\n"
             f"• B3 (Braintree Auth): {b3_status}\n"
             f"• PP (PPCP): {pp_status}\n"
-            f"• PPRO (PayPal Pro): {ppro_status}\n\n"
+            f"• PPRO (PayPal Pro): {ppro_status}\n"
+            f"• ST (Stripe): {st_status}\n\n"
             "Click to toggle:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -4383,7 +4588,7 @@ async def gwinterval_callback_handler(update: Update, context: ContextTypes.DEFA
     if action.startswith('gwinterval_') and not action.startswith('gwinterval_set_'):
         # Show interval selection for a specific gateway
         gateway = action.replace('gwinterval_', '')
-        gateway_names = {'b3': 'B3 (Braintree Auth)', 'pp': 'PP (PPCP)', 'ppro': 'PPRO (PayPal Pro)'}
+        gateway_names = {'b3': 'B3 (Braintree Auth)', 'pp': 'PP (PPCP)', 'ppro': 'PPRO (PayPal Pro)', 'st': 'ST (Stripe)'}
         gateway_name = gateway_names.get(gateway, gateway.upper())
         
         current_interval = get_gateway_interval(gateway)
@@ -4425,7 +4630,7 @@ async def gwinterval_callback_handler(update: Update, context: ContextTypes.DEFA
                 await query.edit_message_text("❌ Invalid interval value.")
                 return
             
-            gateway_names = {'b3': 'B3', 'pp': 'PP', 'ppro': 'PPRO'}
+            gateway_names = {'b3': 'B3', 'pp': 'PP', 'ppro': 'PPRO', 'st': 'ST'}
             gateway_name = gateway_names.get(gateway, gateway.upper())
             
             if set_gateway_interval(gateway, interval):
@@ -4435,11 +4640,13 @@ async def gwinterval_callback_handler(update: Update, context: ContextTypes.DEFA
                 b3_interval = intervals.get('b3', 1)
                 pp_interval = intervals.get('pp', 1)
                 ppro_interval = intervals.get('ppro', 1)
+                st_interval = intervals.get('st', 1)
                 
                 keyboard = [
                     [InlineKeyboardButton(f"⏱️ B3: {b3_interval}s", callback_data='gwinterval_b3')],
                     [InlineKeyboardButton(f"⏱️ PP: {pp_interval}s", callback_data='gwinterval_pp')],
                     [InlineKeyboardButton(f"⏱️ PPRO: {ppro_interval}s", callback_data='gwinterval_ppro')],
+                    [InlineKeyboardButton(f"⏱️ ST: {st_interval}s", callback_data='gwinterval_st')],
                     [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
@@ -4449,7 +4656,8 @@ async def gwinterval_callback_handler(update: Update, context: ContextTypes.DEFA
                     f"✅ {gateway_name} interval updated to {interval} second(s)\n\n"
                     f"• B3 (Braintree Auth): {b3_interval} second(s)\n"
                     f"• PP (PPCP): {pp_interval} second(s)\n"
-                    f"• PPRO (PayPal Pro): {ppro_interval} second(s)\n\n"
+                    f"• PPRO (PayPal Pro): {ppro_interval} second(s)\n"
+                    f"• ST (Stripe): {st_interval} second(s)\n\n"
                     "Click a gateway to change its interval:",
                     reply_markup=reply_markup,
                     parse_mode='Markdown'
@@ -4820,6 +5028,149 @@ async def ppcp_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         
         await query.edit_message_text(
             f"🔗 *PPCP Sites*\n\nTotal sites: {len(sites)}\nAuto-Remove Bad Sites: {auto_remove_status}\n\nSelect an option:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+
+async def stripe_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle Stripe sites callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Check if user is admin or mod
+    if not is_admin_or_mod(user_id):
+        await query.edit_message_text("❌ This action is only available to admins and mods.")
+        return
+    
+    action = query.data
+    
+    if action == 'stripe_add_site':
+        # Store pending action
+        with pending_ppcp_actions_lock:
+            pending_ppcp_actions[user_id] = {'action': 'add_stripe_site'}
+        
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='stripe_cancel')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "➕ *Add Stripe Site*\n\n"
+            "Please send the WooCommerce product page URL:\n"
+            "Example: `https://example-shop.com/product/sample-product`",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'stripe_view_sites':
+        sites = load_stripe_sites()
+        
+        if not sites:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='settings_stripe_sites')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "📋 *Stripe Sites*\n\nNo sites found.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        sites_list = "\n".join([f"• {site}" for site in sites])
+        
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='settings_stripe_sites')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"📋 *Stripe Sites* ({len(sites)} total)\n\n{sites_list}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action == 'stripe_remove_site':
+        sites = load_stripe_sites()
+        
+        if not sites:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='settings_stripe_sites')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "➖ *Remove Stripe Site*\n\nNo sites to remove.",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return
+        
+        keyboard = []
+        for i, site in enumerate(sites):
+            # Truncate long URLs for button display
+            display_name = site[:30] + "..." if len(site) > 30 else site
+            keyboard.append([InlineKeyboardButton(f"🗑️ {display_name}", callback_data=f'stripe_del_{i}')])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='settings_stripe_sites')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "➖ *Remove Stripe Site*\n\nSelect a site to remove:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('stripe_del_'):
+        index = int(action.replace('stripe_del_', ''))
+        sites = load_stripe_sites()
+        
+        if 0 <= index < len(sites):
+            removed_site = sites[index]
+            remove_stripe_site(removed_site)
+            
+            await query.edit_message_text(
+                f"✅ *Site Removed*\n\n{removed_site}",
+                parse_mode='Markdown'
+            )
+            
+            # Show updated list after a moment
+            await asyncio.sleep(1)
+            
+            # Redirect back to Stripe sites menu
+            sites = load_stripe_sites()
+            
+            keyboard = [
+                [InlineKeyboardButton("➕ Add Site", callback_data='stripe_add_site')],
+            ]
+            if sites:
+                keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='stripe_view_sites')])
+                keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='stripe_remove_site')])
+            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                f"⚡ *Stripe Sites*\n\nTotal sites: {len(sites)}\n\nSelect an option:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text("❌ Invalid site index.")
+    
+    elif action == 'stripe_cancel':
+        # Cancel pending action
+        with pending_ppcp_actions_lock:
+            if user_id in pending_ppcp_actions:
+                del pending_ppcp_actions[user_id]
+        
+        # Redirect back to Stripe sites menu
+        sites = load_stripe_sites()
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Add Site", callback_data='stripe_add_site')],
+        ]
+        if sites:
+            keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='stripe_view_sites')])
+            keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='stripe_remove_site')])
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"⚡ *Stripe Sites*\n\nTotal sites: {len(sites)}\n\nSelect an option:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -5264,6 +5615,32 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
                 if add_paypalpro_site(site_url):
                     await update.message.reply_text(
                         f"✅ *PayPal Pro Site Added Successfully*\n\n{site_url}",
+                        parse_mode='Markdown'
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"⚠️ Site already exists or failed to add:\n{site_url}",
+                        parse_mode='Markdown'
+                    )
+                return
+            
+            elif action_type == 'add_stripe_site':
+                # Adding Stripe site
+                del pending_ppcp_actions[user_id]
+                
+                site_url = message_text.strip()
+                
+                # Validate URL
+                if not site_url.startswith('http://') and not site_url.startswith('https://'):
+                    await update.message.reply_text(
+                        "❌ Invalid URL. Please provide a valid URL starting with http:// or https://",
+                        parse_mode='Markdown'
+                    )
+                    return
+                
+                if add_stripe_site(site_url):
+                    await update.message.reply_text(
+                        f"✅ *Stripe Site Added Successfully*\n\n{site_url}",
                         parse_mode='Markdown'
                     )
                 else:
@@ -6503,6 +6880,7 @@ def main():
     application.add_handler(CallbackQueryHandler(b3info_callback_handler, pattern=r'^b3info_'))
     application.add_handler(CallbackQueryHandler(b3test_callback_handler, pattern=r'^b3test'))
     application.add_handler(CallbackQueryHandler(ppcp_callback_handler, pattern=r'^ppcp_'))
+    application.add_handler(CallbackQueryHandler(stripe_callback_handler, pattern=r'^stripe_'))
     application.add_handler(CallbackQueryHandler(paypalpro_callback_handler, pattern=r'^ppro_'))
     application.add_handler(CallbackQueryHandler(mass_callback_handler, pattern=r'^mass_'))
     application.add_handler(CallbackQueryHandler(gwinterval_callback_handler, pattern=r'^gwinterval_'))
