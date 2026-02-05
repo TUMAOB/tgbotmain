@@ -11,6 +11,7 @@ import random
 import string
 import time
 import tempfile
+import html
 from datetime import datetime
 from urllib.parse import urlencode, urlparse, parse_qs
 import requests
@@ -569,7 +570,9 @@ def process_card(lista: str, sites: str, proxy: str = None) -> str:
         price1 = ''
         price_match = re.search(r'class="woocommerce-Price-currencySymbol">([^<]+)</span>\s*([\d.]+)', checkout_content)
         if price_match:
-            price1 = f"{price_match.group(1)}{price_match.group(2)}"
+            # Decode HTML entities (e.g., &#36; -> $, &pound; -> £)
+            currency_symbol = html.unescape(price_match.group(1))
+            price1 = f"{currency_symbol}{price_match.group(2)}"
         
         # Create Stripe payment method
         stripe_data = {
