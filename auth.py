@@ -2598,10 +2598,24 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             return
         
         user_list = "📋 *Approved Users*\n\n"
+        db_updated = False
+        
         for user_id_str, user_data in db.items():
             access_type = user_data.get('access_type', 'unknown')
             expiry = user_data.get('expiry_date')
             username = user_data.get('username')
+            
+            # Try to fetch username from Telegram if not stored
+            if not username:
+                try:
+                    chat = await context.bot.get_chat(int(user_id_str))
+                    username = chat.username
+                    # Update the database with the fetched username
+                    if username:
+                        user_data['username'] = username
+                        db_updated = True
+                except Exception:
+                    pass  # User may have blocked the bot or doesn't exist
             
             if access_type == 'lifetime':
                 status = "♾️ Lifetime"
@@ -2616,6 +2630,10 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             # Display username next to user ID if available
             username_display = f" (@{username})" if username else ""
             user_list += f"• `{user_id_str}`{username_display} - {status}\n"
+        
+        # Save updated usernames to database
+        if db_updated:
+            save_user_db(db)
         
         await query.edit_message_text(user_list, parse_mode='Markdown')
     
