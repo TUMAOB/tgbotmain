@@ -568,11 +568,24 @@ def process_card(lista: str, sites: str, proxy: str = None) -> str:
         
         # Extract price
         price1 = ''
-        price_match = re.search(r'class="woocommerce-Price-currencySymbol">([^<]+)</span>\s*([\d.]+)', checkout_content)
+        # Try multiple patterns for WooCommerce price extraction
+        # Pattern 1: Currency symbol followed by price (handles <bdi> wrapper)
+        price_match = re.search(r'class="woocommerce-Price-currencySymbol">([^<]+)</span>([0-9,]+\.?[0-9]*)', checkout_content)
+        if not price_match:
+            # Pattern 2: With whitespace between symbol and price
+            price_match = re.search(r'class="woocommerce-Price-currencySymbol">([^<]+)</span>\s*([0-9,]+\.?[0-9]*)', checkout_content)
+        if not price_match:
+            # Pattern 3: Price in data attribute or order total
+            price_match = re.search(r'order-total[^>]*>.*?([£$€¥₹]|&#\d+;|&[a-z]+;)\s*([0-9,]+\.?[0-9]*)', checkout_content, re.DOTALL)
+        if not price_match:
+            # Pattern 4: Generic price pattern with HTML entity
+            price_match = re.search(r'(&#36;|&#163;|&#8364;|\$|£|€)\s*([0-9,]+\.?[0-9]*)', checkout_content)
+        
         if price_match:
             # Decode HTML entities (e.g., &#36; -> $, &pound; -> £)
             currency_symbol = html.unescape(price_match.group(1))
-            price1 = f"{currency_symbol}{price_match.group(2)}"
+            price_value = price_match.group(2).replace(',', '')
+            price1 = f"{currency_symbol}{price_value}"
         
         # Create Stripe payment method
         stripe_data = {
