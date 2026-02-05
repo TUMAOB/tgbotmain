@@ -107,9 +107,11 @@ def validate_restart_prerequisites() -> tuple:
         return False, f"Missing dependencies: {', '.join(missing_modules)}", RESTART_ERROR_DEPENDENCIES_MISSING
     
     # Check 5: Verify bot token is available
+    # Use local base_dir since _BASE_DIR may not be defined yet at module load time
+    local_base_dir = os.path.dirname(os.path.abspath(__file__))
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
     if not bot_token:
-        token_file = 'bot_token.txt'
+        token_file = os.path.join(local_base_dir, 'bot_token.txt')
         if not os.path.exists(token_file):
             return False, "Bot token not found (no env var or bot_token.txt)", RESTART_ERROR_VALIDATION_FAILED
         try:
@@ -121,8 +123,9 @@ def validate_restart_prerequisites() -> tuple:
             return False, f"Failed to read bot token: {str(e)}", RESTART_ERROR_VALIDATION_FAILED
     
     # Check 6: Verify we can write to the log file
+    log_file_path = os.path.join(local_base_dir, 'bot.log')
     try:
-        with open('bot.log', 'a') as f:
+        with open(log_file_path, 'a') as f:
             pass  # Just test if we can open for append
     except Exception as e:
         return False, f"Cannot write to bot.log: {str(e)}", RESTART_ERROR_VALIDATION_FAILED
@@ -239,12 +242,14 @@ def auto_restart_bot(updated_files=None, show_admin_menu=False) -> tuple:
     
     # Step 4: Start the new bot process in background
     try:
-        log_file = open('bot.log', 'a')
+        log_file_path = os.path.join(_BASE_DIR, 'bot.log')
+        log_file = open(log_file_path, 'a')
         process = subprocess.Popen(
             [sys.executable, script_path],
             stdout=log_file,
             stderr=subprocess.STDOUT,
-            start_new_session=True
+            start_new_session=True,
+            cwd=_BASE_DIR  # Set working directory to script directory
         )
         
         # Verify the process started successfully
@@ -287,48 +292,51 @@ def auto_restart_bot(updated_files=None, show_admin_menu=False) -> tuple:
 # Admin user ID
 ADMIN_ID = 7405188060
 
+# Base directory for all data files (same directory as auth.py)
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Mods database file
-MODS_DB_FILE = 'mods_db.json'
-MODS_DB_LOCK_FILE = 'mods_db.json.lock'
+MODS_DB_FILE = os.path.join(_BASE_DIR, 'mods_db.json')
+MODS_DB_LOCK_FILE = os.path.join(_BASE_DIR, 'mods_db.json.lock')
 
 # Auto-scan settings file
-AUTO_SCAN_SETTINGS_FILE = 'auto_scan_settings.json'
-AUTO_SCAN_SETTINGS_LOCK_FILE = 'auto_scan_settings.json.lock'
+AUTO_SCAN_SETTINGS_FILE = os.path.join(_BASE_DIR, 'auto_scan_settings.json')
+AUTO_SCAN_SETTINGS_LOCK_FILE = os.path.join(_BASE_DIR, 'auto_scan_settings.json.lock')
 
 # PPCP auto-remove settings file
-PPCP_AUTO_REMOVE_SETTINGS_FILE = 'ppcp_auto_remove_settings.json'
-PPCP_AUTO_REMOVE_SETTINGS_LOCK_FILE = 'ppcp_auto_remove_settings.json.lock'
+PPCP_AUTO_REMOVE_SETTINGS_FILE = os.path.join(_BASE_DIR, 'ppcp_auto_remove_settings.json')
+PPCP_AUTO_REMOVE_SETTINGS_LOCK_FILE = os.path.join(_BASE_DIR, 'ppcp_auto_remove_settings.json.lock')
 
 # Restart state file (for sending confirmation after restart)
-RESTART_STATE_FILE = 'restart_state.json'
-RESTART_STATE_LOCK_FILE = 'restart_state.json.lock'
+RESTART_STATE_FILE = os.path.join(_BASE_DIR, 'restart_state.json')
+RESTART_STATE_LOCK_FILE = os.path.join(_BASE_DIR, 'restart_state.json.lock')
 
 # Mass check settings file (enable/disable mass checking per gateway)
-MASS_SETTINGS_FILE = 'mass_settings.json'
-MASS_SETTINGS_LOCK_FILE = 'mass_settings.json.lock'
+MASS_SETTINGS_FILE = os.path.join(_BASE_DIR, 'mass_settings.json')
+MASS_SETTINGS_LOCK_FILE = os.path.join(_BASE_DIR, 'mass_settings.json.lock')
 
 # Gateway check interval settings file (check interval per gateway in seconds)
-GATEWAY_INTERVAL_SETTINGS_FILE = 'gateway_interval_settings.json'
-GATEWAY_INTERVAL_SETTINGS_LOCK_FILE = 'gateway_interval_settings.json.lock'
+GATEWAY_INTERVAL_SETTINGS_FILE = os.path.join(_BASE_DIR, 'gateway_interval_settings.json')
+GATEWAY_INTERVAL_SETTINGS_LOCK_FILE = os.path.join(_BASE_DIR, 'gateway_interval_settings.json.lock')
 
 # Bot settings file (start message, etc.)
-BOT_SETTINGS_FILE = 'bot_settings.json'
-BOT_SETTINGS_LOCK_FILE = 'bot_settings.json.lock'
+BOT_SETTINGS_FILE = os.path.join(_BASE_DIR, 'bot_settings.json')
+BOT_SETTINGS_LOCK_FILE = os.path.join(_BASE_DIR, 'bot_settings.json.lock')
 
 # Forward channel ID (set to None to disable forwarding, or use channel username like '@yourchannel' or channel ID like -1001234567890)
 FORWARD_CHANNEL_ID = -1003865829143  # Replace with your channel ID or username
 
 # User database file
-USER_DB_FILE = 'users_db.json'
-USER_DB_LOCK_FILE = 'users_db.json.lock'
+USER_DB_FILE = os.path.join(_BASE_DIR, 'users_db.json')
+USER_DB_LOCK_FILE = os.path.join(_BASE_DIR, 'users_db.json.lock')
 
 # Site freeze state file
-SITE_FREEZE_FILE = 'site_freeze_state.json'
-SITE_FREEZE_LOCK_FILE = 'site_freeze_state.json.lock'
+SITE_FREEZE_FILE = os.path.join(_BASE_DIR, 'site_freeze_state.json')
+SITE_FREEZE_LOCK_FILE = os.path.join(_BASE_DIR, 'site_freeze_state.json.lock')
 
 # Forwarders database file
-FORWARDERS_DB_FILE = 'forwarders_db.json'
-FORWARDERS_DB_LOCK_FILE = 'forwarders_db.json.lock'
+FORWARDERS_DB_FILE = os.path.join(_BASE_DIR, 'forwarders_db.json')
+FORWARDERS_DB_LOCK_FILE = os.path.join(_BASE_DIR, 'forwarders_db.json.lock')
 
 # Channel ID for forwarding approved cards
 CHANNEL_ID = None
@@ -599,7 +607,7 @@ def save_ppcp_auto_remove_settings(settings):
 def load_ppcp_sites():
     """Load PPCP sites from ppcp/sites.txt"""
     sites = []
-    sites_file = 'ppcp/sites.txt'
+    sites_file = os.path.join(_BASE_DIR, 'ppcp', 'sites.txt')
     if os.path.exists(sites_file):
         with open(sites_file, 'r') as f:
             sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
@@ -607,8 +615,9 @@ def load_ppcp_sites():
 
 def save_ppcp_sites(sites):
     """Save PPCP sites to ppcp/sites.txt"""
-    sites_file = 'ppcp/sites.txt'
-    os.makedirs('ppcp', exist_ok=True)
+    ppcp_dir = os.path.join(_BASE_DIR, 'ppcp')
+    sites_file = os.path.join(ppcp_dir, 'sites.txt')
+    os.makedirs(ppcp_dir, exist_ok=True)
     with open(sites_file, 'w') as f:
         for site in sites:
             if site.strip():
@@ -638,7 +647,7 @@ def remove_ppcp_site(site_url):
 def load_paypalpro_sites():
     """Load PayPal Pro sites from paypalpro/sites.txt"""
     sites = []
-    sites_file = 'paypalpro/sites.txt'
+    sites_file = os.path.join(_BASE_DIR, 'paypalpro', 'sites.txt')
     if os.path.exists(sites_file):
         with open(sites_file, 'r') as f:
             sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
@@ -646,8 +655,9 @@ def load_paypalpro_sites():
 
 def save_paypalpro_sites(sites):
     """Save PayPal Pro sites to paypalpro/sites.txt"""
-    sites_file = 'paypalpro/sites.txt'
-    os.makedirs('paypalpro', exist_ok=True)
+    paypalpro_dir = os.path.join(_BASE_DIR, 'paypalpro')
+    sites_file = os.path.join(paypalpro_dir, 'sites.txt')
+    os.makedirs(paypalpro_dir, exist_ok=True)
     with open(sites_file, 'w') as f:
         for site in sites:
             if site.strip():
@@ -677,7 +687,7 @@ def remove_paypalpro_site(site_url):
 def load_stripe_sites():
     """Load Stripe sites from stripe/sites.txt"""
     sites = []
-    sites_file = 'stripe/sites.txt'
+    sites_file = os.path.join(_BASE_DIR, 'stripe', 'sites.txt')
     if os.path.exists(sites_file):
         with open(sites_file, 'r') as f:
             sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
@@ -685,8 +695,9 @@ def load_stripe_sites():
 
 def save_stripe_sites(sites):
     """Save Stripe sites to stripe/sites.txt"""
-    sites_file = 'stripe/sites.txt'
-    os.makedirs('stripe', exist_ok=True)
+    stripe_dir = os.path.join(_BASE_DIR, 'stripe')
+    sites_file = os.path.join(stripe_dir, 'sites.txt')
+    os.makedirs(stripe_dir, exist_ok=True)
     with open(sites_file, 'w') as f:
         for site in sites:
             if site.strip():
@@ -2224,16 +2235,17 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 track_request_start('pp')
             
             # Check the single card using async ppcp gateway
-            # Load sites from sites.txt file
+            # Load sites from sites.txt file using absolute path
             sites = []
-            if os.path.exists('ppcp/sites.txt'):
-                with open('ppcp/sites.txt', 'r') as f:
+            ppcp_sites_file = os.path.join(_BASE_DIR, 'ppcp', 'sites.txt')
+            root_sites_file = os.path.join(_BASE_DIR, 'sites.txt')
+            if os.path.exists(ppcp_sites_file):
+                with open(ppcp_sites_file, 'r') as f:
                     sites = [line.strip() for line in f if line.strip()]
-            else:
+            elif os.path.exists(root_sites_file):
                 # Load from the project root if ppcp folder is not present in the path
-                if os.path.exists('sites.txt'):
-                    with open('sites.txt', 'r') as f:
-                        sites = [line.strip() for line in f if line.strip()]
+                with open(root_sites_file, 'r') as f:
+                    sites = [line.strip() for line in f if line.strip()]
 
             if not sites:
                 result = "❌ No sites found!"
@@ -2304,16 +2316,17 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         try:
-            # Load sites from sites.txt file
+            # Load sites from sites.txt file using absolute path
             sites = []
-            if os.path.exists('ppcp/sites.txt'):
-                with open('ppcp/sites.txt', 'r') as f:
+            ppcp_sites_file = os.path.join(_BASE_DIR, 'ppcp', 'sites.txt')
+            root_sites_file = os.path.join(_BASE_DIR, 'sites.txt')
+            if os.path.exists(ppcp_sites_file):
+                with open(ppcp_sites_file, 'r') as f:
                     sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-            else:
+            elif os.path.exists(root_sites_file):
                 # Load from the project root if ppcp folder is not present in the path
-                if os.path.exists('sites.txt'):
-                    with open('sites.txt', 'r') as f:
-                        sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+                with open(root_sites_file, 'r') as f:
+                    sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
             if not sites:
                 await status_msg.edit_text("❌ No sites found!")
@@ -2824,9 +2837,35 @@ async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Import Stripe checker using importlib to avoid conflict with stripe package
     import importlib.util
     stripe_checker_path = os.path.join(os.path.dirname(__file__), 'stripe', 'allstripecvv.py')
+    
+    # Check if the stripe checker file exists
+    if not os.path.exists(stripe_checker_path):
+        await update.message.reply_text(
+            f"❌ Stripe checker module not found!\n\n"
+            f"Expected path: {stripe_checker_path}\n\n"
+            "Please ensure the 'stripe' folder with 'allstripecvv.py' exists in the bot directory."
+        )
+        return
+    
     spec = importlib.util.spec_from_file_location("allstripecvv", stripe_checker_path)
+    if spec is None or spec.loader is None:
+        await update.message.reply_text(
+            "❌ Failed to load Stripe checker module!\n\n"
+            "The module file exists but could not be loaded. Please check the file for syntax errors."
+        )
+        return
+    
     allstripecvv = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(allstripecvv)
+    try:
+        spec.loader.exec_module(allstripecvv)
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Error loading Stripe checker module!\n\n"
+            f"Error: {str(e)}\n\n"
+            "Please check the module for errors."
+        )
+        return
+    
     sites_str = ','.join(sites)
 
     # Handle single card vs mass checking
@@ -7045,13 +7084,14 @@ def main():
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
     
     if not bot_token:
-        # Try to read from bot_token.txt file
+        # Try to read from bot_token.txt file using absolute path
+        bot_token_file = os.path.join(_BASE_DIR, 'bot_token.txt')
         try:
-            with open('bot_token.txt', 'r') as f:
+            with open(bot_token_file, 'r') as f:
                 bot_token = f.read().strip()
         except FileNotFoundError:
             print("❌ Bot token not found!")
-            print("Please set TELEGRAM_BOT_TOKEN environment variable or create bot_token.txt file")
+            print(f"Please set TELEGRAM_BOT_TOKEN environment variable or create {bot_token_file} file")
             return
     
     # Create application
