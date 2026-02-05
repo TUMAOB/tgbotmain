@@ -720,15 +720,30 @@ def load_mass_settings():
         if os.path.exists(MASS_SETTINGS_FILE):
             try:
                 with open(MASS_SETTINGS_FILE, 'r') as f:
-                    return json.load(f)
+                    settings = json.load(f)
+                    # Ensure max_cards field exists for backward compatibility
+                    if 'max_cards' not in settings:
+                        settings['max_cards'] = {
+                            'b3': 50,    # Default max cards for Braintree Auth
+                            'pp': 50,    # Default max cards for PPCP
+                            'ppro': 50,  # Default max cards for PayPal Pro
+                            'st': 50     # Default max cards for Stripe
+                        }
+                    return settings
             except:
                 pass
-        # Default: all gateways enabled for mass checking
+        # Default: all gateways enabled for mass checking with max cards limits
         return {
             'b3': True,   # Braintree Auth
             'pp': True,   # PPCP
             'ppro': True, # PayPal Pro
-            'st': True    # Stripe
+            'st': True,   # Stripe
+            'max_cards': {
+                'b3': 50,    # Default max cards for Braintree Auth
+                'pp': 50,    # Default max cards for PPCP
+                'ppro': 50,  # Default max cards for PayPal Pro
+                'st': 50     # Default max cards for Stripe
+            }
         }
 
 def save_mass_settings(settings):
@@ -749,6 +764,36 @@ def toggle_mass_setting(gateway):
     settings[gateway] = not settings.get(gateway, True)
     save_mass_settings(settings)
     return settings[gateway]
+
+# Valid max cards options for mass checking
+VALID_MAX_CARDS_OPTIONS = [10, 25, 50, 100, 200, 500]
+
+def get_max_cards(gateway):
+    """Get maximum cards allowed for mass checking for a specific gateway"""
+    settings = load_mass_settings()
+    max_cards = settings.get('max_cards', {})
+    return max_cards.get(gateway, 50)  # Default to 50 if not set
+
+def set_max_cards(gateway, max_cards):
+    """Set maximum cards allowed for mass checking for a specific gateway"""
+    if max_cards not in VALID_MAX_CARDS_OPTIONS:
+        return False
+    settings = load_mass_settings()
+    if 'max_cards' not in settings:
+        settings['max_cards'] = {}
+    settings['max_cards'][gateway] = max_cards
+    save_mass_settings(settings)
+    return True
+
+def get_all_max_cards():
+    """Get all gateway max cards settings"""
+    settings = load_mass_settings()
+    return settings.get('max_cards', {
+        'b3': 50,
+        'pp': 50,
+        'ppro': 50,
+        'st': 50
+    })
 
 # ============= GATEWAY CHECK INTERVAL SETTINGS FUNCTIONS =============
 
@@ -1935,6 +1980,9 @@ async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         return
+    
+    # Get max cards limit for B3
+    b3_max_cards = get_max_cards('b3')
 
     # Check if card details are provided
     if not context.args:
@@ -1984,6 +2032,16 @@ async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     total_cards = len(normalized_cards)
+    
+    # Check if total cards exceeds max limit for B3
+    if total_cards > b3_max_cards:
+        await update.message.reply_text(
+            f"❌ Too many cards! Maximum allowed for B3 gateway: {b3_max_cards} cards.\n\n"
+            f"You provided: {total_cards} cards.\n"
+            f"Please reduce the number of cards and try again.",
+            parse_mode='Markdown'
+        )
+        return
 
     # Check if user can start a mass check (prevents single user from blocking system)
     can_start, error_msg = can_start_mass_check(user_id)
@@ -2213,6 +2271,19 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "❌ Mass checking is currently disabled for PP (PPCP) gateway.\n\n"
                 "Please use /pp for single card checking or contact admin.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Get max cards limit for PP
+        pp_max_cards = get_max_cards('pp')
+        
+        # Check if total cards exceeds max limit for PP
+        if total_cards > pp_max_cards:
+            await update.message.reply_text(
+                f"❌ Too many cards! Maximum allowed for PP (PPCP) gateway: {pp_max_cards} cards.\n\n"
+                f"You provided: {total_cards} cards.\n"
+                f"Please reduce the number of cards and try again.",
                 parse_mode='Markdown'
             )
             return
@@ -2453,6 +2524,19 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "❌ Mass checking is currently disabled for PPRO (PayPal Pro) gateway.\n\n"
                 "Please use /pro for single card checking or contact admin.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Get max cards limit for PPRO
+        ppro_max_cards = get_max_cards('ppro')
+        
+        # Check if total cards exceeds max limit for PPRO
+        if total_cards > ppro_max_cards:
+            await update.message.reply_text(
+                f"❌ Too many cards! Maximum allowed for PPRO (PayPal Pro) gateway: {ppro_max_cards} cards.\n\n"
+                f"You provided: {total_cards} cards.\n"
+                f"Please reduce the number of cards and try again.",
                 parse_mode='Markdown'
             )
             return
@@ -2810,6 +2894,19 @@ async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "❌ Mass checking is currently disabled for ST (Stripe) gateway.\n\n"
                 "Please use /st for single card checking or contact admin.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Get max cards limit for ST
+        st_max_cards = get_max_cards('st')
+        
+        # Check if total cards exceeds max limit for ST
+        if total_cards > st_max_cards:
+            await update.message.reply_text(
+                f"❌ Too many cards! Maximum allowed for ST (Stripe) gateway: {st_max_cards} cards.\n\n"
+                f"You provided: {total_cards} cards.\n"
+                f"Please reduce the number of cards and try again.",
                 parse_mode='Markdown'
             )
             return
@@ -3585,29 +3682,40 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
     elif action == 'settings_mass':
         # Show mass check settings
         settings = load_mass_settings()
+        max_cards = settings.get('max_cards', {'b3': 50, 'pp': 50, 'ppro': 50, 'st': 50})
         
         b3_status = "🟢 ON" if settings.get('b3', True) else "🔴 OFF"
         pp_status = "🟢 ON" if settings.get('pp', True) else "🔴 OFF"
         ppro_status = "🟢 ON" if settings.get('ppro', True) else "🔴 OFF"
         st_status = "🟢 ON" if settings.get('st', True) else "🔴 OFF"
         
+        b3_max = max_cards.get('b3', 50)
+        pp_max = max_cards.get('pp', 50)
+        ppro_max = max_cards.get('ppro', 50)
+        st_max = max_cards.get('st', 50)
+        
         keyboard = [
-            [InlineKeyboardButton(f"B3 Mass: {b3_status}", callback_data='mass_toggle_b3')],
-            [InlineKeyboardButton(f"PP Mass: {pp_status}", callback_data='mass_toggle_pp')],
-            [InlineKeyboardButton(f"PPRO Mass: {ppro_status}", callback_data='mass_toggle_ppro')],
-            [InlineKeyboardButton(f"ST Mass: {st_status}", callback_data='mass_toggle_st')],
+            [InlineKeyboardButton(f"B3 Mass: {b3_status}", callback_data='mass_toggle_b3'),
+             InlineKeyboardButton(f"📊 Max: {b3_max}", callback_data='mass_maxcards_b3')],
+            [InlineKeyboardButton(f"PP Mass: {pp_status}", callback_data='mass_toggle_pp'),
+             InlineKeyboardButton(f"📊 Max: {pp_max}", callback_data='mass_maxcards_pp')],
+            [InlineKeyboardButton(f"PPRO Mass: {ppro_status}", callback_data='mass_toggle_ppro'),
+             InlineKeyboardButton(f"📊 Max: {ppro_max}", callback_data='mass_maxcards_ppro')],
+            [InlineKeyboardButton(f"ST Mass: {st_status}", callback_data='mass_toggle_st'),
+             InlineKeyboardButton(f"📊 Max: {st_max}", callback_data='mass_maxcards_st')],
             [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
             "🔄 *Mass Check Settings*\n\n"
-            "Enable or disable mass checking for each gateway:\n\n"
-            f"• B3 (Braintree Auth): {b3_status}\n"
-            f"• PP (PPCP): {pp_status}\n"
-            f"• PPRO (PayPal Pro): {ppro_status}\n"
-            f"• ST (Stripe): {st_status}\n\n"
-            "Click to toggle:",
+            "Enable/disable mass checking and set max cards per gateway:\n\n"
+            f"• B3 (Braintree Auth): {b3_status} | Max: {b3_max} cards\n"
+            f"• PP (PPCP): {pp_status} | Max: {pp_max} cards\n"
+            f"• PPRO (PayPal Pro): {ppro_status} | Max: {ppro_max} cards\n"
+            f"• ST (Stripe): {st_status} | Max: {st_max} cards\n\n"
+            "Click gateway name to toggle ON/OFF\n"
+            "Click 📊 Max to set maximum cards:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -4539,21 +4647,31 @@ async def mass_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         
         # Refresh the menu
         settings = load_mass_settings()
+        max_cards = settings.get('max_cards', {'b3': 50, 'pp': 50, 'ppro': 50, 'st': 50})
         
         b3_status = "🟢 ON" if settings.get('b3', True) else "🔴 OFF"
         pp_status = "🟢 ON" if settings.get('pp', True) else "🔴 OFF"
         ppro_status = "🟢 ON" if settings.get('ppro', True) else "🔴 OFF"
         st_status = "🟢 ON" if settings.get('st', True) else "🔴 OFF"
         
+        b3_max = max_cards.get('b3', 50)
+        pp_max = max_cards.get('pp', 50)
+        ppro_max = max_cards.get('ppro', 50)
+        st_max = max_cards.get('st', 50)
+        
         gateway_names = {'b3': 'B3', 'pp': 'PP', 'ppro': 'PPRO', 'st': 'ST'}
         toggled_name = gateway_names.get(gateway, gateway.upper())
         toggled_status = "🟢 ON" if new_status else "🔴 OFF"
         
         keyboard = [
-            [InlineKeyboardButton(f"B3 Mass: {b3_status}", callback_data='mass_toggle_b3')],
-            [InlineKeyboardButton(f"PP Mass: {pp_status}", callback_data='mass_toggle_pp')],
-            [InlineKeyboardButton(f"PPRO Mass: {ppro_status}", callback_data='mass_toggle_ppro')],
-            [InlineKeyboardButton(f"ST Mass: {st_status}", callback_data='mass_toggle_st')],
+            [InlineKeyboardButton(f"B3 Mass: {b3_status}", callback_data='mass_toggle_b3'),
+             InlineKeyboardButton(f"📊 Max: {b3_max}", callback_data='mass_maxcards_b3')],
+            [InlineKeyboardButton(f"PP Mass: {pp_status}", callback_data='mass_toggle_pp'),
+             InlineKeyboardButton(f"📊 Max: {pp_max}", callback_data='mass_maxcards_pp')],
+            [InlineKeyboardButton(f"PPRO Mass: {ppro_status}", callback_data='mass_toggle_ppro'),
+             InlineKeyboardButton(f"📊 Max: {ppro_max}", callback_data='mass_maxcards_ppro')],
+            [InlineKeyboardButton(f"ST Mass: {st_status}", callback_data='mass_toggle_st'),
+             InlineKeyboardButton(f"📊 Max: {st_max}", callback_data='mass_maxcards_st')],
             [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -4561,14 +4679,108 @@ async def mass_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(
             f"🔄 *Mass Check Settings*\n\n"
             f"✅ {toggled_name} mass checking is now {toggled_status}\n\n"
-            f"• B3 (Braintree Auth): {b3_status}\n"
-            f"• PP (PPCP): {pp_status}\n"
-            f"• PPRO (PayPal Pro): {ppro_status}\n"
-            f"• ST (Stripe): {st_status}\n\n"
-            "Click to toggle:",
+            f"• B3 (Braintree Auth): {b3_status} | Max: {b3_max} cards\n"
+            f"• PP (PPCP): {pp_status} | Max: {pp_max} cards\n"
+            f"• PPRO (PayPal Pro): {ppro_status} | Max: {ppro_max} cards\n"
+            f"• ST (Stripe): {st_status} | Max: {st_max} cards\n\n"
+            "Click gateway name to toggle ON/OFF\n"
+            "Click 📊 Max to set maximum cards:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
+    
+    elif action.startswith('mass_maxcards_') and not action.startswith('mass_maxcards_set_'):
+        # Show max cards selection for a specific gateway
+        gateway = action.replace('mass_maxcards_', '')
+        gateway_names = {'b3': 'B3 (Braintree Auth)', 'pp': 'PP (PPCP)', 'ppro': 'PPRO (PayPal Pro)', 'st': 'ST (Stripe)'}
+        gateway_name = gateway_names.get(gateway, gateway.upper())
+        
+        current_max = get_max_cards(gateway)
+        
+        # Create buttons for each valid max cards option
+        keyboard = []
+        row = []
+        for max_val in VALID_MAX_CARDS_OPTIONS:
+            # Mark current max with a checkmark
+            label = f"✅ {max_val}" if max_val == current_max else f"{max_val}"
+            row.append(InlineKeyboardButton(label, callback_data=f'mass_maxcards_set_{gateway}_{max_val}'))
+            if len(row) == 3:  # 3 buttons per row
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='settings_mass')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"📊 *Set Max Cards for {gateway_name}*\n\n"
+            f"Current max: {current_max} cards\n\n"
+            "Select maximum cards allowed for mass checking:\n"
+            "• Lower = less load on system\n"
+            "• Higher = more cards per check",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    elif action.startswith('mass_maxcards_set_'):
+        # Set the max cards for a gateway
+        parts = action.replace('mass_maxcards_set_', '').split('_')
+        if len(parts) == 2:
+            gateway = parts[0]
+            try:
+                max_val = int(parts[1])
+            except ValueError:
+                await query.edit_message_text("❌ Invalid max cards value.")
+                return
+            
+            gateway_names = {'b3': 'B3', 'pp': 'PP', 'ppro': 'PPRO', 'st': 'ST'}
+            gateway_name = gateway_names.get(gateway, gateway.upper())
+            
+            if set_max_cards(gateway, max_val):
+                # Refresh the main mass settings menu
+                settings = load_mass_settings()
+                max_cards = settings.get('max_cards', {'b3': 50, 'pp': 50, 'ppro': 50, 'st': 50})
+                
+                b3_status = "🟢 ON" if settings.get('b3', True) else "🔴 OFF"
+                pp_status = "🟢 ON" if settings.get('pp', True) else "🔴 OFF"
+                ppro_status = "🟢 ON" if settings.get('ppro', True) else "🔴 OFF"
+                st_status = "🟢 ON" if settings.get('st', True) else "🔴 OFF"
+                
+                b3_max = max_cards.get('b3', 50)
+                pp_max = max_cards.get('pp', 50)
+                ppro_max = max_cards.get('ppro', 50)
+                st_max = max_cards.get('st', 50)
+                
+                keyboard = [
+                    [InlineKeyboardButton(f"B3 Mass: {b3_status}", callback_data='mass_toggle_b3'),
+                     InlineKeyboardButton(f"📊 Max: {b3_max}", callback_data='mass_maxcards_b3')],
+                    [InlineKeyboardButton(f"PP Mass: {pp_status}", callback_data='mass_toggle_pp'),
+                     InlineKeyboardButton(f"📊 Max: {pp_max}", callback_data='mass_maxcards_pp')],
+                    [InlineKeyboardButton(f"PPRO Mass: {ppro_status}", callback_data='mass_toggle_ppro'),
+                     InlineKeyboardButton(f"📊 Max: {ppro_max}", callback_data='mass_maxcards_ppro')],
+                    [InlineKeyboardButton(f"ST Mass: {st_status}", callback_data='mass_toggle_st'),
+                     InlineKeyboardButton(f"📊 Max: {st_max}", callback_data='mass_maxcards_st')],
+                    [InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')],
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await query.edit_message_text(
+                    f"🔄 *Mass Check Settings*\n\n"
+                    f"✅ {gateway_name} max cards updated to {max_val}\n\n"
+                    f"• B3 (Braintree Auth): {b3_status} | Max: {b3_max} cards\n"
+                    f"• PP (PPCP): {pp_status} | Max: {pp_max} cards\n"
+                    f"• PPRO (PayPal Pro): {ppro_status} | Max: {ppro_max} cards\n"
+                    f"• ST (Stripe): {st_status} | Max: {st_max} cards\n\n"
+                    "Click gateway name to toggle ON/OFF\n"
+                    "Click 📊 Max to set maximum cards:",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Invalid max cards value. Valid options are: {', '.join(str(i) for i in VALID_MAX_CARDS_OPTIONS)} cards."
+                )
 
 
 async def gwinterval_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
