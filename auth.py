@@ -289,6 +289,58 @@ def auto_restart_bot(updated_files=None, show_admin_menu=False) -> tuple:
     print("🔄 Exiting current process for restart...")
     os._exit(0)
 
+
+async def auto_restart_bot_async(update, context, reason: str = "configuration change"):
+    """
+    Async wrapper for auto_restart_bot that sends a notification before restarting.
+    Used when sites or cookies are added/modified.
+    
+    Args:
+        update: Telegram update object
+        context: Telegram context object
+        reason: Reason for the restart (for notification)
+    """
+    try:
+        # Send notification about restart
+        if update.message:
+            await update.message.reply_text(
+                f"🔄 *Bot Reloading*\n\n"
+                f"Reason: {reason}\n"
+                f"Please wait a moment...",
+                parse_mode='Markdown'
+            )
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(
+                f"🔄 *Bot Reloading*\n\n"
+                f"Reason: {reason}\n"
+                f"Please wait a moment...",
+                parse_mode='Markdown'
+            )
+        
+        # Small delay to ensure message is sent
+        await asyncio.sleep(0.5)
+        
+        # Trigger restart
+        success, error_msg = auto_restart_bot(
+            updated_files=[reason],
+            show_admin_menu=False
+        )
+        
+        # If we get here, restart failed
+        if update.message:
+            await update.message.reply_text(
+                f"❌ *Restart Failed*\n\n{error_msg}",
+                parse_mode='Markdown'
+            )
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(
+                f"❌ *Restart Failed*\n\n{error_msg}",
+                parse_mode='Markdown'
+            )
+    except Exception as e:
+        print(f"❌ Error in auto_restart_bot_async: {str(e)}")
+
+
 # Admin user ID
 ADMIN_ID = 7405188060
 
@@ -4581,26 +4633,8 @@ async def paypalpro_callback_handler(update: Update, context: ContextTypes.DEFAU
                 parse_mode='Markdown'
             )
             
-            # Show updated list after a moment
-            await asyncio.sleep(1)
-            
-            # Redirect back to PayPal Pro sites menu
-            sites = load_paypalpro_sites()
-            
-            keyboard = [
-                [InlineKeyboardButton("➕ Add Site", callback_data='ppro_add_site')],
-            ]
-            if sites:
-                keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='ppro_view_sites')])
-                keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='ppro_remove_site')])
-            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await query.edit_message_text(
-                f"💳 *PayPal Pro Sites*\n\nTotal sites: {len(sites)}\n\nSelect an option:",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
+            # Auto-reload bot to apply changes
+            await auto_restart_bot_async(update, context, "PayPal Pro site removed")
         else:
             await query.edit_message_text("❌ Invalid site index.")
     
@@ -5162,30 +5196,8 @@ async def ppcp_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode='Markdown'
             )
             
-            # Show updated list after a moment
-            await asyncio.sleep(1)
-            
-            # Redirect back to PPCP sites menu
-            sites = load_ppcp_sites()
-            auto_remove_settings = load_ppcp_auto_remove_settings()
-            auto_remove_enabled = auto_remove_settings.get('enabled', True)
-            auto_remove_status = "🟢 ON" if auto_remove_enabled else "🔴 OFF"
-            
-            keyboard = [
-                [InlineKeyboardButton("➕ Add Site", callback_data='ppcp_add_site')],
-            ]
-            if sites:
-                keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='ppcp_view_sites')])
-                keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='ppcp_remove_site')])
-            keyboard.append([InlineKeyboardButton(f"🗑️ Auto-Remove Bad Sites: {auto_remove_status}", callback_data='ppcp_toggle_auto_remove')])
-            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await query.edit_message_text(
-                f"🔗 *PPCP Sites*\n\nTotal sites: {len(sites)}\nAuto-Remove Bad Sites: {auto_remove_status}\n\nSelect an option:",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
+            # Auto-reload bot to apply changes
+            await auto_restart_bot_async(update, context, "PPCP site removed")
         else:
             await query.edit_message_text("❌ Invalid site index.")
     
@@ -5342,26 +5354,8 @@ async def stripe_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 parse_mode='Markdown'
             )
             
-            # Show updated list after a moment
-            await asyncio.sleep(1)
-            
-            # Redirect back to Stripe sites menu
-            sites = load_stripe_sites()
-            
-            keyboard = [
-                [InlineKeyboardButton("➕ Add Site", callback_data='stripe_add_site')],
-            ]
-            if sites:
-                keyboard.append([InlineKeyboardButton("📋 View Sites", callback_data='stripe_view_sites')])
-                keyboard.append([InlineKeyboardButton("➖ Remove Site", callback_data='stripe_remove_site')])
-            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='admin_settings')])
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await query.edit_message_text(
-                f"⚡ *Stripe Sites*\n\nTotal sites: {len(sites)}\n\nSelect an option:",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
+            # Auto-reload bot to apply changes
+            await auto_restart_bot_async(update, context, "Stripe site removed")
         else:
             await query.edit_message_text("❌ Invalid site index.")
     
@@ -5770,6 +5764,8 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
                         f"✅ *Site Added Successfully*\n\n{site_url}",
                         parse_mode='Markdown'
                     )
+                    # Auto-reload bot to apply changes
+                    await auto_restart_bot_async(update, context, "PPCP site added")
                 else:
                     await update.message.reply_text(
                         f"⚠️ Site already exists or failed to add:\n{site_url}",
@@ -5831,6 +5827,8 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
                         f"✅ *PayPal Pro Site Added Successfully*\n\n{site_url}",
                         parse_mode='Markdown'
                     )
+                    # Auto-reload bot to apply changes
+                    await auto_restart_bot_async(update, context, "PayPal Pro site added")
                 else:
                     await update.message.reply_text(
                         f"⚠️ Site already exists or failed to add:\n{site_url}",
@@ -5857,6 +5855,8 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
                         f"✅ *Stripe Site Added Successfully*\n\n{site_url}",
                         parse_mode='Markdown'
                     )
+                    # Auto-reload bot to apply changes
+                    await auto_restart_bot_async(update, context, "Stripe site added")
                 else:
                     await update.message.reply_text(
                         f"⚠️ Site already exists or failed to add:\n{site_url}",
@@ -6107,6 +6107,8 @@ async def file_edit_message_handler(update: Update, context: ContextTypes.DEFAUL
             f"📝 Size: {len(new_content)} characters",
             parse_mode='Markdown'
         )
+        # Auto-reload bot to apply changes (especially for cookies)
+        await auto_restart_bot_async(update, context, f"B3 {filename} updated")
     else:
         await update.message.reply_text(
             f"❌ *Failed to Update File*\n\n"
