@@ -232,6 +232,7 @@ def get_bin_info(bin_number):
         'level': 'Unknown',
         'bank': 'Unknown',
         'country': 'Unknown',
+        'country_code': '',
     }
     try:
         response = requests.get(
@@ -248,6 +249,7 @@ def get_bin_info(bin_number):
                 'level': data.get('level', 'Unknown'),
                 'bank': data.get('bank', 'Unknown'),
                 'country': data.get('country_name', 'Unknown'),
+                'country_code': data.get('country', ''),
             }
     except (requests.RequestException, json.JSONDecodeError, KeyError):
         pass
@@ -822,7 +824,7 @@ def check_card(card_input, proxy=None, sites=None):
             return {
                 'status': 'DECLINED',
                 'approved': False,
-                'message': decline_reason[:100],  # Truncate long messages
+                'message': decline_reason,  # Full response reason
                 'card': card_input,
                 'site': hostname,
                 'price': price,
@@ -876,9 +878,9 @@ def format_result(result):
     bin_info = result.get('bin_info', {})
     
     # Format time - extract just the number for cleaner display
-    time_display = time_taken.replace('s', ' 𝘀𝗲𝗰𝗼𝗻𝗱𝘀')
+    time_display = time_taken.replace('s', '')
     
-    # Build BIN info line
+    # Build BIN info line (brand - type - level)
     bin_parts = []
     if bin_info.get('brand') and bin_info.get('brand') != 'Unknown':
         bin_parts.append(bin_info['brand'])
@@ -886,34 +888,52 @@ def format_result(result):
         bin_parts.append(bin_info['type'])
     if bin_info.get('level') and bin_info.get('level') != 'Unknown':
         bin_parts.append(bin_info['level'])
-    if bin_info.get('country') and bin_info.get('country') != 'Unknown':
-        bin_parts.append(bin_info['country'])
     bin_info_str = ' - '.join(bin_parts) if bin_parts else 'Unknown'
     
     bank_str = bin_info.get('bank', 'Unknown')
     
+    # Get country with flag
+    country_name = bin_info.get('country', 'Unknown')
+    country_code = bin_info.get('country_code', '')
+    
+    # Generate flag from country code using Unicode regional indicators
+    def get_flag_emoji(code):
+        if not code or len(code) != 2:
+            return '🏳️'
+        code = code.upper()
+        # Convert country code to regional indicator symbols
+        return chr(ord('🇦') + ord(code[0]) - ord('A')) + chr(ord('🇦') + ord(code[1]) - ord('A'))
+    
+    country_flag = get_flag_emoji(country_code) if country_code else '🏳️'
+    country_display = f"{country_name} {country_flag}" if country_name != 'Unknown' else 'Unknown 🏳️'
+    
     # Determine status header with emoji
     if status == 'CVV':
-        status_header = "#CVV ✅"
+        status_header = "CVV ✅"
     elif status == 'CCN':
-        status_header = "#CCN ✅"
+        status_header = "CCN ✅"
     elif status == 'DECLINED':
-        status_header = "#DECLINED ❌"
+        status_header = "DECLINED ❌"
     else:
-        status_header = "#ERROR ❌"
+        status_header = "ERROR ❌"
     
     # Format for CVV, CCN, and DECLINED statuses
     if status in ('CVV', 'CCN', 'DECLINED'):
         result_text = f"""{status_header}
 
 𝗖𝗖 ⇾ {card}
-𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Paypal Pro
+
+𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ PayPal Pro
+
 𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ {message}
 
 𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info_str}
+
 𝗕𝗮𝗻𝗸: {bank_str}
 
-𝗧𝗼𝗼𝗸 {time_display}
+𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {country_display}
+
+𝗧𝗼𝗼𝗸 {time_display} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀
 
 𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB"""
     else:
@@ -921,7 +941,9 @@ def format_result(result):
         result_text = f"""{status_header}
 
 𝗖𝗖 ⇾ {card}
-𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Paypal Pro
+
+𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ PayPal Pro
+
 𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ {message}
 
 𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB"""
