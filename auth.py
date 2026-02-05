@@ -2681,93 +2681,53 @@ def normalize_stripe_card_format(card_input):
 
 
 def format_stripe_result(raw_result, card_details, elapsed_time):
-    """Format Stripe check result for display"""
-    # Parse card details
-    parts = card_details.strip().split('|')
-    cc = parts[0]
-    mm = parts[1]
-    yy = parts[2] if len(parts[2]) == 4 else f"20{parts[2]}"
-    cvv = parts[3]
+    """Format Stripe check result for display
     
-    # Get BIN info
-    bin_info = get_bin_info(cc[:6]) or default_bin_info()
+    The allstripecvv.py module returns pre-formatted responses that start with:
+    - "CVV ✅" for CVV live (charged or insufficient funds)
+    - "CCN ✅" for CCN live (security code incorrect, 3DS required)
+    - "DECLINED ❌" for declined cards
     
-    # Extract price from result
-    price = ""
-    if "AMOUNT:" in raw_result:
-        try:
-            price_match = re.search(r'AMOUNT:([^\]]+)', raw_result)
-            if price_match:
-                price = price_match.group(1).strip()
-        except:
-            price = ""
-    
-    # Determine status and format response
+    This function detects the status and returns the raw result as-is since
+    it's already properly formatted by allstripecvv.py
+    """
+    # Detect status from the raw result format returned by allstripecvv.py
+    # The result starts with status like "CVV ✅", "CCN ✅", or "DECLINED ❌"
     is_cvv = False
     is_ccn = False
-    is_declined = False
-    reason = ""
     
-    if "#CVV" in raw_result:
+    # Check the beginning of the result for status indicators
+    raw_result_lower = raw_result.lower().strip()
+    first_line = raw_result.split('\n')[0].strip() if raw_result else ""
+    
+    # Check for CVV live indicators
+    if first_line.startswith("CVV") and "✅" in first_line:
         is_cvv = True
-        if "Insufficient Funds" in raw_result:
-            reason = "Insufficient Funds ✅"
-        elif "CHARGED" in raw_result:
-            reason = "CHARGED CVV ✅"
-        else:
-            reason = "CVV LIVE ✅"
-    elif "#CCN" in raw_result:
+    # Check for CCN live indicators  
+    elif first_line.startswith("CCN") and "✅" in first_line:
         is_ccn = True
-        if "Security Code" in raw_result or "security code" in raw_result:
-            reason = "CCN LIVE (Security Code Incorrect) ✅"
-        elif "3ds" in raw_result.lower():
-            reason = "CCN LIVE (3DS Required) ✅"
-        else:
-            reason = "CCN LIVE ✅"
-    elif "#DEAD" in raw_result or "#ERROR" in raw_result:
-        is_declined = True
-        if "DECLINED" in raw_result:
-            reason = "DECLINED ❌"
-        elif "card was declined" in raw_result.lower():
-            reason = "Card Declined ❌"
-        elif "NONCE ERROR" in raw_result:
-            reason = "Nonce Error ❌"
-        elif "Payment processing failed" in raw_result:
-            reason = "Payment Processing Failed ❌"
-        else:
-            bracket_match = re.search(r'#(?:DEAD|ERROR)\s*\[([^\]]+)\]', raw_result)
-            if bracket_match:
-                reason = f"{bracket_match.group(1)} ❌"
-            else:
-                reason = "DECLINED ❌"
-    else:
-        is_declined = True
-        reason = "Unknown Response ❌"
+    # Also check for legacy format patterns (backward compatibility)
+    elif "#CVV" in raw_result or "[#CVV]" in raw_result:
+        is_cvv = True
+    elif "#CCN" in raw_result or "[#CCN]" in raw_result:
+        is_ccn = True
+    # Check response content for live indicators
+    elif "𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾" in raw_result:
+        response_match = re.search(r'𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾\s*(.+?)(?:\n|$)', raw_result)
+        if response_match:
+            response_text = response_match.group(1).lower()
+            if "insufficient funds" in response_text:
+                is_cvv = True
+            elif "charged" in response_text:
+                is_cvv = True
+            elif "security code" in response_text:
+                is_ccn = True
+            elif "3ds" in response_text:
+                is_ccn = True
     
-    # Format the response
-    if is_cvv or is_ccn:
-        status_emoji = "✅"
-        status_text = "CVV" if is_cvv else "CCN"
-    else:
-        status_emoji = "❌"
-        status_text = "DECLINED"
-    
-    formatted_result = f"""{status_text} {status_emoji}
-
-𝗖𝗖 ⇾ {cc}|{mm}|{yy}|{cvv}
-𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Stripe Charge {f'"{price}"' if price else ''}
-𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ {reason}
-
-𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'UNKNOWN')} - {bin_info.get('type', 'UNKNOWN')} - {bin_info.get('level', 'UNKNOWN')}
-𝗕𝗮𝗻𝗸: {bin_info.get('bank', 'UNKNOWN')}
-𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'UNKNOWN')} {bin_info.get('emoji', '🏳️')}
-
-𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀
-
-𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB
-"""
-    
-    return formatted_result, is_cvv or is_ccn
+    # The raw_result from allstripecvv.py is already properly formatted
+    # Just return it as-is along with the approval status
+    return raw_result, is_cvv or is_ccn
 
 
 async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
