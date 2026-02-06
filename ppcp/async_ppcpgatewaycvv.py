@@ -54,8 +54,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global session and cache
+# Global session and cache - thread-safe session management
 _session = None
+_session_lock = asyncio.Lock()
 _bin_cache = {}  # Simple dict cache for BIN info
 
 # Configuration
@@ -1033,14 +1034,12 @@ async def create_session() -> aiohttp.ClientSession:
         keepalive_timeout=60,  # Longer keepalive for connection reuse
         enable_cleanup_closed=True,
         force_close=False,
-        # Additional optimizations for high concurrency
-        resolver=None,  # Use default resolver
     )
     
     timeout = aiohttp.ClientTimeout(
         total=Config.TIMEOUT,
-        connect=10,  # Slightly longer connect timeout for reliability
-        sock_read=15,  # Longer read timeout
+        connect=10,
+        sock_read=15,
         sock_connect=10
     )
     
@@ -1048,9 +1047,21 @@ async def create_session() -> aiohttp.ClientSession:
         connector=connector, 
         timeout=timeout,
         trust_env=True,
-        # Enable automatic decompression
         auto_decompress=True,
     )
+
+
+async def get_session() -> aiohttp.ClientSession:
+    """Get or create the global shared session with thread-safe initialization."""
+    global _session
+    if _session is not None and not _session.closed:
+        return _session
+    async with _session_lock:
+        # Double-check after acquiring lock
+        if _session is not None and not _session.closed:
+            return _session
+        _session = await create_session()
+        return _session
 
 
 def _is_empty_response(result: Dict[str, Any]) -> bool:
@@ -1115,8 +1126,7 @@ async def check_single_card(card_details: str, site_urls: List[str], proxy: Opti
         track_request_start('pp')
     
     try:
-        if _session is None:
-            _session = await create_session()
+        session = await get_session()
         
         # Get available sites (excluding bad ones)
         available_sites = get_available_sites() if not site_urls else site_urls
@@ -1155,7 +1165,7 @@ async def check_single_card(card_details: str, site_urls: List[str], proxy: Opti
             site_has_empty_response = False
             
             for empty_retry in range(empty_response_retries):
-                checker = AsyncCardChecker(card_details, site_url, proxy, _session)
+                checker = AsyncCardChecker(card_details, site_url, proxy, session)
                 result = await checker.check()
                 last_result = result
                 
@@ -1229,10 +1239,9 @@ async def check_single_card(card_details: str, site_urls: List[str], proxy: Opti
         if GATEWAY_STATS_AVAILABLE:
             track_request_end('pp', success=False, response_time=check_elapsed)
         raise
-        raise
 
 
-async def check_multiple_cards(card_list: List[str], site_list: List[str], max_concurrent: int = 10) -> List[str]:
+async def check_multiple_cards(card_list: List[str], site_list: List[str], max_concurrent: int = 50) -> List[str]:
     """Check multiple cards with controlled concurrency (returns all results at once)"""
     semaphore = asyncio.Semaphore(max_concurrent)
     
@@ -1272,9 +1281,7 @@ async def check_cards_streaming(
     Yields:
         Tuple of (index, card, result) for each card as it completes
     """
-    global _session
-    if _session is None:
-        _session = await create_session()
+    await get_session()  # Ensure session is initialized
     
     # Get available sites
     available_sites = get_available_sites() if not site_list else site_list
@@ -1379,8 +1386,9 @@ async def check_cards_with_immediate_callback(
 async def cleanup():
     """Cleanup resources"""
     global _session
-    if _session:
-        await _session.close()
+    async with _session_lock:
+        if _session and not _session.closed:
+            await _session.close()
         _session = None
 
 

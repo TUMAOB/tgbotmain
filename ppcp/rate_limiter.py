@@ -58,6 +58,6 @@ class DomainRateLimiter:
         await limiter.acquire(tokens)
 
 # Global rate limiter instance - Optimized for bare metal server
-# Increased limits for handling hundreds of concurrent users
-global_rate_limiter = RateLimiter(rate_limit_per_second=100, burst_limit=200)
-domain_rate_limiter = DomainRateLimiter(default_rate=30, default_burst=60)
+# Very high limits for handling thousands of concurrent users
+global_rate_limiter = RateLimiter(rate_limit_per_second=500, burst_limit=1000)
+domain_rate_limiter = DomainRateLimiter(default_rate=100, default_burst=200)

@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from user_agent import generate_user_agent
 import time
 import json
+import uuid
 from datetime import datetime, timedelta
 import random
 import urllib3
@@ -21,12 +22,13 @@ from filelock import SoftFileLock
 from functools import wraps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
+from telegram.error import RetryAfter, TimedOut, NetworkError
 
 # Create a dedicated ThreadPoolExecutor for card checking operations
 # This prevents blocking the event loop when multiple users check cards simultaneously
-# Using 200 workers for bare metal server - allows massive concurrent card checks
-# Optimized for handling hundreds of users checking simultaneously
-CARD_CHECK_EXECUTOR = ThreadPoolExecutor(max_workers=200, thread_name_prefix="card_checker")
+# Using 500 workers for bare metal server - allows massive concurrent card checks
+# Optimized for handling thousands of users checking simultaneously
+CARD_CHECK_EXECUTOR = ThreadPoolExecutor(max_workers=500, thread_name_prefix="card_checker")
 
 # Register cleanup function to properly shutdown the executor on exit
 def _cleanup_executor():
@@ -37,6 +39,59 @@ def _cleanup_executor():
         pass
 
 atexit.register(_cleanup_executor)
+
+
+# ============= SAFE TELEGRAM API HELPERS =============
+# These helpers handle Telegram rate limits (429) and network errors gracefully
+# so that high-volume result sending doesn't crash the bot.
+
+async def safe_reply_text(message, text, max_retries=3, **kwargs):
+    """Send a reply with automatic retry on Telegram rate limits and network errors."""
+    for attempt in range(max_retries):
+        try:
+            return await message.reply_text(text, **kwargs)
+        except RetryAfter as e:
+            wait = e.retry_after + 0.5
+            await asyncio.sleep(wait)
+        except (TimedOut, NetworkError):
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+            else:
+                return None
+        except Exception:
+            return None
+    return None
+
+
+async def safe_edit_text(msg, text, max_retries=3, **kwargs):
+    """Edit a message with automatic retry on Telegram rate limits and network errors."""
+    for attempt in range(max_retries):
+        try:
+            return await msg.edit_text(text, **kwargs)
+        except RetryAfter as e:
+            wait = e.retry_after + 0.5
+            await asyncio.sleep(wait)
+        except (TimedOut, NetworkError):
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+            else:
+                return None
+        except Exception:
+            return None
+    return None
+
+
+async def safe_delete_message(msg, max_retries=2):
+    """Delete a message with automatic retry on Telegram rate limits."""
+    for attempt in range(max_retries):
+        try:
+            return await msg.delete()
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 0.5)
+        except Exception:
+            return None
+    return None
+
 
 # Import ppcp module for /pp command
 sys.path.append(os.path.join(os.path.dirname(__file__), 'ppcp'))
@@ -65,14 +120,14 @@ except ImportError:
     CONCURRENCY_MANAGER_AVAILABLE = False
     print("Warning: Concurrency manager module not available")
 
-# Per-gateway semaphores for controlling concurrent requests
-# These allow fine-grained control over how many requests each gateway handles simultaneously
-# Optimized for bare metal server - high limits
+# Per-gateway semaphores for controlling concurrent requests per card check
+# These control how many individual card checks can run simultaneously per gateway
+# Optimized for bare metal server - very high limits for thousands of concurrent users
 GATEWAY_SEMAPHORES = {
-    'b3': asyncio.Semaphore(150),   # Braintree Auth - 150 concurrent
-    'pp': asyncio.Semaphore(150),   # PPCP - 150 concurrent
-    'ppro': asyncio.Semaphore(150), # PayPal Pro - 150 concurrent
-    'st': asyncio.Semaphore(150),   # Stripe - 150 concurrent
+    'b3': asyncio.Semaphore(500),   # Braintree Auth - 500 concurrent card checks
+    'pp': asyncio.Semaphore(500),   # PPCP - 500 concurrent card checks
+    'ppro': asyncio.Semaphore(500), # PayPal Pro - 500 concurrent card checks
+    'st': asyncio.Semaphore(500),   # Stripe - 500 concurrent card checks
 }
 
 # Global request counter for monitoring
@@ -472,17 +527,18 @@ user_rate_limit = {}
 user_rate_limit_lock = threading.Lock()
 RATE_LIMIT_SECONDS = 1  # Minimum seconds between checks per user (1 second as requested)
 
-# Active mass check tracking: user_id -> {'task': asyncio.Task, 'started': timestamp, 'total_cards': int}
+# Active mass check tracking: check_id -> {'user_id': int, 'started': timestamp, 'total_cards': int}
+# Uses unique check_id so multiple mass checks per user are properly tracked
 # This allows admin to use commands even when users are mass checking
 active_mass_checks = {}
 active_mass_checks_lock = threading.Lock()
 
 # Maximum concurrent mass checks per user (to prevent single user from blocking)
-MAX_CONCURRENT_MASS_CHECKS_PER_USER = 3
+MAX_CONCURRENT_MASS_CHECKS_PER_USER = 5
 
 # Maximum total concurrent mass checks (optimized for bare metal server)
-# Increased significantly to handle hundreds of users
-MAX_TOTAL_CONCURRENT_MASS_CHECKS = 50
+# Very high limit for handling thousands of users simultaneously
+MAX_TOTAL_CONCURRENT_MASS_CHECKS = 200
 
 # REMOVED: Global variables for resource selection (now using per-request local variables)
 # This prevents conflicts when multiple users check cards simultaneously
@@ -630,21 +686,24 @@ def get_active_mass_check_count():
 def get_user_mass_check_count(user_id):
     """Get the number of active mass checks for a specific user"""
     with active_mass_checks_lock:
-        return sum(1 for uid in active_mass_checks if uid == user_id)
+        return sum(1 for cid, info in active_mass_checks.items() if info.get('user_id') == user_id)
 
 def register_mass_check(user_id, total_cards):
-    """Register a new mass check for a user"""
+    """Register a new mass check for a user. Returns a unique check_id."""
+    check_id = str(uuid.uuid4())[:12]
     with active_mass_checks_lock:
-        active_mass_checks[user_id] = {
+        active_mass_checks[check_id] = {
+            'user_id': user_id,
             'started': time.time(),
             'total_cards': total_cards
         }
+    return check_id
 
-def unregister_mass_check(user_id):
-    """Unregister a mass check when completed"""
+def unregister_mass_check(check_id):
+    """Unregister a mass check when completed using its unique check_id"""
     with active_mass_checks_lock:
-        if user_id in active_mass_checks:
-            del active_mass_checks[user_id]
+        if check_id in active_mass_checks:
+            del active_mass_checks[check_id]
 
 def can_start_mass_check(user_id):
     """Check if a user can start a new mass check"""
@@ -654,9 +713,9 @@ def can_start_mass_check(user_id):
     
     with active_mass_checks_lock:
         # Check user's concurrent mass checks
-        user_count = sum(1 for uid in active_mass_checks if uid == user_id)
+        user_count = sum(1 for cid, info in active_mass_checks.items() if info.get('user_id') == user_id)
         if user_count >= MAX_CONCURRENT_MASS_CHECKS_PER_USER:
-            return False, "You already have a mass check in progress. Please wait for it to complete."
+            return False, f"You already have {user_count} mass check(s) in progress. Max: {MAX_CONCURRENT_MASS_CHECKS_PER_USER}. Please wait."
         
         # Check total concurrent mass checks (but allow admin to bypass)
         total_count = len(active_mass_checks)
@@ -1807,17 +1866,18 @@ async def check_ppcp_cards_streaming(card_list, site_urls, on_result_callback, m
     Returns:
         Summary dict with counts
     """
-    # Use gateway semaphore to control overall concurrency
+    # No wrapping semaphore - per-card concurrency is controlled by max_concurrent
+    # and the internal semaphore in async_ppcpgatewaycvv.py
+    # This allows multiple users to run mass checks simultaneously without blocking each other
     update_request_stats('pp', 'start')
     try:
-        async with GATEWAY_SEMAPHORES['pp']:
-            from ppcp.async_ppcpgatewaycvv import check_cards_with_immediate_callback
-            summary = await check_cards_with_immediate_callback(
-                card_list, 
-                site_urls, 
-                on_result_callback, 
-                max_concurrent
-            )
+        from ppcp.async_ppcpgatewaycvv import check_cards_with_immediate_callback
+        summary = await check_cards_with_immediate_callback(
+            card_list, 
+            site_urls, 
+            on_result_callback, 
+            max_concurrent
+        )
         update_request_stats('pp', 'end', success=True)
         return summary
     except Exception as e:
@@ -1898,9 +1958,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         status_text = "📊 **Active Mass Checks:**\n\n"
-        for uid, info in active_mass_checks.items():
+        for check_id, info in active_mass_checks.items():
             elapsed = time.time() - info['started']
-            status_text += f"• User ID: `{uid}`\n"
+            status_text += f"• User ID: `{info.get('user_id', 'Unknown')}`\n"
             status_text += f"  Cards: {info['total_cards']}\n"
             status_text += f"  Running: {elapsed:.1f}s\n\n"
         
@@ -2051,19 +2111,14 @@ async def b3_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Send "Checking Please Wait" message
+    # Send "Checking Please Wait" message immediately so user knows bot is responsive
     checking_msg = await update.message.reply_text("⏳ Checking Please Wait...")
 
-    # Use gateway semaphore to control concurrent requests
-    # This prevents overwhelming the gateway while allowing high concurrency
+    # No blocking semaphore for single checks - run_in_executor already handles concurrency
     update_request_stats('b3', 'start')
     try:
-        async with GATEWAY_SEMAPHORES['b3']:
-            # Check the card using run_in_executor to prevent blocking the event loop
-            # This allows other users to use the bot while this check is in progress
-            loop = asyncio.get_event_loop()
-            result, error_type, site_name = await loop.run_in_executor(CARD_CHECK_EXECUTOR, check_card, card_details)
-        
+        loop = asyncio.get_event_loop()
+        result, error_type, site_name = await loop.run_in_executor(CARD_CHECK_EXECUTOR, check_card, card_details)
         update_request_stats('b3', 'end', success=("APPROVED" in result))
     except Exception as e:
         update_request_stats('b3', 'end', success=False)
@@ -2072,7 +2127,7 @@ async def b3_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         site_name = None
 
     # Edit the message with the result
-    await checking_msg.edit_text(result)
+    await safe_edit_text(checking_msg, result)
     
     # Forward to channel if approved
     await forward_to_channel(context, card_details, result, gateway='b3')
@@ -2117,7 +2172,7 @@ Checked by: @{update.effective_user.username or 'Unknown'} (ID: `{user_id}`)
             # Don't notify user about forwarding failure to avoid spam
 
 async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /b3s command for mass card checking - optimized to not block admin commands"""
+    """Handle /b3s command for mass card checking - fully concurrent, non-blocking"""
     user_id = update.effective_user.id
     is_admin = user_id == ADMIN_ID
 
@@ -2208,72 +2263,84 @@ async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⏳ {error_msg}")
         return
 
-    # Register this mass check
-    register_mass_check(user_id, total_cards)
+    # Register this mass check (returns unique check_id)
+    check_id = register_mass_check(user_id, total_cards)
 
-    # Send initial status message
+    # Send initial status message immediately so user knows bot is responsive
     status_msg = await update.message.reply_text(
-        f"⏳ Checking {total_cards} card(s)...\n"
+        f"⏳ Checking {total_cards} card(s) concurrently...\n"
         f"Progress: 0/{total_cards}"
     )
 
     try:
-        # Process each card with yielding to event loop
+        # Concurrent processing - all cards checked in parallel via thread pool
         approved_count = 0
         declined_count = 0
+        completed_count = 0
+        results_lock = asyncio.Lock()
 
-        for idx, card in enumerate(normalized_cards, 1):
-            # Yield to event loop to allow other commands to process
-            # This is the key optimization - allows admin commands to run
-            await asyncio.sleep(0)  # Yield control to event loop
+        async def check_single_b3(idx, card):
+            """Check a single card concurrently with semaphore control."""
+            nonlocal approved_count, declined_count, completed_count
             
-            # Rate limiting for non-admin users (between cards in mass check)
-            if not is_admin and idx > 1:
-                with user_rate_limit_lock:
-                    current_time = time.time()
-                    last_check_time = user_rate_limit.get(user_id, 0)
-                    time_since_last_check = current_time - last_check_time
+            async with GATEWAY_SEMAPHORES['b3']:
+                update_request_stats('b3', 'start')
+                try:
+                    loop = asyncio.get_event_loop()
+                    result, error_type, site_name = await loop.run_in_executor(
+                        CARD_CHECK_EXECUTOR, check_card, card
+                    )
+                    
+                    is_approved = "APPROVED" in result and "✅" in result
+                    update_request_stats('b3', 'end', success=is_approved)
+                except Exception as e:
+                    result = f"❌ Error: {str(e)}"
+                    error_type = 'exception'
+                    site_name = None
+                    is_approved = False
+                    update_request_stats('b3', 'end', success=False)
 
-                    if time_since_last_check < RATE_LIMIT_SECONDS:
-                        wait_time = RATE_LIMIT_SECONDS - time_since_last_check
-                        await asyncio.sleep(wait_time)
+            # Update counters
+            async with results_lock:
+                completed_count += 1
+                current_completed = completed_count
+                if is_approved:
+                    approved_count += 1
+                else:
+                    declined_count += 1
+                current_approved = approved_count
+                current_declined = declined_count
 
-                    # Update last check time
-                    user_rate_limit[user_id] = time.time()
+            # Send result immediately
+            await safe_reply_text(
+                update.message,
+                f"Card {current_completed}/{total_cards}:\n{result}"
+            )
 
-            # Check the card using run_in_executor with dedicated executor to not block event loop
-            loop = asyncio.get_event_loop()
-            result, error_type, site_name = await loop.run_in_executor(CARD_CHECK_EXECUTOR, check_card, card)
-
-            # Count approved/declined
-            if "APPROVED" in result and "✅" in result:
-                approved_count += 1
-                # Forward to channel if approved
+            # Forward to channel if approved
+            if is_approved:
                 await forward_to_channel(context, card, result, gateway='b3')
-            else:
-                declined_count += 1
 
-            # Send result immediately after checking
-            card_result = f"Card {idx}/{total_cards}:\n{result}"
-            await update.message.reply_text(card_result)
-
-            # Update progress every card
-            try:
-                await status_msg.edit_text(
-                    f"⏳ Checking {total_cards} card(s)...\n"
-                    f"Progress: {idx}/{total_cards}\n"
-                    f"✅ Approved: {approved_count} | ❌ Declined: {declined_count}"
+            # Update progress (throttle to every 3 cards or last card)
+            if current_completed % 3 == 0 or current_completed == total_cards:
+                await safe_edit_text(
+                    status_msg,
+                    f"⏳ Checking {total_cards} card(s) concurrently...\n"
+                    f"Progress: {current_completed}/{total_cards}\n"
+                    f"✅ Approved: {current_approved} | ❌ Declined: {current_declined}"
                 )
-            except:
-                pass  # Ignore edit errors (e.g., message not modified)
 
             # Handle error notifications
             if error_type:
                 admin_message = f"⚠️ Site Error Detected!\n\nSite: {site_name}\nError Type: {error_type}\nChecked by: @{update.effective_user.username or 'Unknown'} (ID: {user_id})\n\nPlease fix the issue."
                 try:
                     await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message)
-                except Exception as e:
-                    print(f"❌ Failed to send admin notification: {str(e)}")
+                except Exception:
+                    pass
+
+        # Launch all card checks concurrently
+        tasks = [check_single_b3(idx, card) for idx, card in enumerate(normalized_cards, 1)]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         # Send final summary
         summary = f"📊 Mass Check Complete\n\n"
@@ -2281,16 +2348,13 @@ async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         summary += f"✅ Approved: {approved_count}\n"
         summary += f"❌ Declined: {declined_count}"
 
-        await update.message.reply_text(summary)
+        await safe_reply_text(update.message, summary)
 
         # Delete the progress message
-        try:
-            await status_msg.delete()
-        except:
-            pass
+        await safe_delete_message(status_msg)
     finally:
         # Always unregister the mass check when done
-        unregister_mass_check(user_id)
+        unregister_mass_check(check_id)
 
 
 async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2373,65 +2437,60 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Update last check time
                 user_rate_limit[user_id] = current_time
 
-        # Send "Checking Please Wait" message
+        # Send "Checking Please Wait" message immediately so user knows bot is responsive
         checking_msg = await update.message.reply_text("⏳ Checking Please Wait...")
 
-        # Use gateway semaphore for controlled concurrency
+        # No blocking semaphore - async PPCP checker handles its own concurrency
         update_request_stats('pp', 'start')
         try:
-            async with GATEWAY_SEMAPHORES['pp']:
-                # Track gateway usage start
-                pp_check_start = time.time()
-                if GATEWAY_STATS_AVAILABLE:
-                    track_request_start('pp')
-                
-                # Check the single card using async ppcp gateway
-                # Load sites from sites.txt file using absolute path
-                sites = []
-                ppcp_sites_file = os.path.join(_BASE_DIR, 'ppcp', 'sites.txt')
-                root_sites_file = os.path.join(_BASE_DIR, 'sites.txt')
-                if os.path.exists(ppcp_sites_file):
-                    with open(ppcp_sites_file, 'r') as f:
-                        sites = [line.strip() for line in f if line.strip()]
-                elif os.path.exists(root_sites_file):
-                    # Load from the project root if ppcp folder is not present in the path
-                    with open(root_sites_file, 'r') as f:
-                        sites = [line.strip() for line in f if line.strip()]
+            # Track gateway usage start
+            pp_check_start = time.time()
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_start('pp')
+            
+            # Load sites from sites.txt file using absolute path
+            sites = []
+            ppcp_sites_file = os.path.join(_BASE_DIR, 'ppcp', 'sites.txt')
+            root_sites_file = os.path.join(_BASE_DIR, 'sites.txt')
+            if os.path.exists(ppcp_sites_file):
+                with open(ppcp_sites_file, 'r') as f:
+                    sites = [line.strip() for line in f if line.strip()]
+            elif os.path.exists(root_sites_file):
+                with open(root_sites_file, 'r') as f:
+                    sites = [line.strip() for line in f if line.strip()]
 
-                if not sites:
-                    result = "❌ No sites found!"
-                    pp_success = False
-                else:
-                    from ppcp.async_ppcpgatewaycvv import check_single_card
-                    result = await check_single_card(normalized_cards[0], sites)
-                    # Determine success based on result
-                    pp_success = ("CCN" in result and "✅" in result) or ("CVV" in result and "✅" in result)
-                
-                # Track gateway usage end
-                pp_check_elapsed = time.time() - pp_check_start
-                if GATEWAY_STATS_AVAILABLE:
-                    track_request_end('pp', success=pp_success or "❌" not in result[:20], response_time=pp_check_elapsed)
+            if not sites:
+                result = "❌ No sites found!"
+                pp_success = False
+            else:
+                from ppcp.async_ppcpgatewaycvv import check_single_card
+                result = await check_single_card(normalized_cards[0], sites)
+                pp_success = ("CCN" in result and "✅" in result) or ("CVV" in result and "✅" in result)
+            
+            # Track gateway usage end
+            pp_check_elapsed = time.time() - pp_check_start
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_end('pp', success=pp_success or "❌" not in result[:20], response_time=pp_check_elapsed)
 
             update_request_stats('pp', 'end', success=pp_success)
             
             # Edit the message with the result
-            await checking_msg.edit_text(result)
+            await safe_edit_text(checking_msg, result)
 
             # Forward to channel if approved
             await forward_to_channel(context, normalized_cards[0], result, gateway='pp')
 
         except Exception as e:
             update_request_stats('pp', 'end', success=False)
-            # Track failed request
             pp_check_elapsed = time.time() - pp_check_start if 'pp_check_start' in locals() else 0
             if GATEWAY_STATS_AVAILABLE:
                 track_request_end('pp', success=False, response_time=pp_check_elapsed)
             error_message = f"❌ Error checking card: {str(e)}"
-            await checking_msg.edit_text(error_message)
+            await safe_edit_text(checking_msg, error_message)
             print(f"Error in /pp command: {str(e)}")
 
     else:
-        # Mass checking with STREAMING results - each result sent immediately as it completes
+        # Mass checking with CONCURRENT STREAMING results - all cards checked in parallel
         # Check if mass checking is enabled for PP
         if not is_mass_enabled('pp'):
             await update.message.reply_text(
@@ -2460,12 +2519,12 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"⏳ {error_msg}")
             return
 
-        # Register this mass check
-        register_mass_check(user_id, total_cards)
+        # Register this mass check (returns unique check_id)
+        check_id = register_mass_check(user_id, total_cards)
 
-        # Send initial status message
+        # Send initial status message immediately
         status_msg = await update.message.reply_text(
-            f"⏳ Checking {total_cards} card(s)...\n"
+            f"⏳ Checking {total_cards} card(s) concurrently...\n"
             f"Progress: 0/{total_cards}"
         )
 
@@ -2478,63 +2537,59 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with open(ppcp_sites_file, 'r') as f:
                     sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
             elif os.path.exists(root_sites_file):
-                # Load from the project root if ppcp folder is not present in the path
                 with open(root_sites_file, 'r') as f:
                     sites = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
             if not sites:
-                await status_msg.edit_text("❌ No sites found!")
+                await safe_edit_text(status_msg, "❌ No sites found!")
                 return
 
             # Track progress for streaming results
             approved_count = 0
             declined_count = 0
             completed_count = 0
+            results_lock = asyncio.Lock()
             
             # Define callback to send each result IMMEDIATELY as it completes
             async def on_card_result(index, card, result):
                 nonlocal approved_count, declined_count, completed_count
                 
-                # Yield to event loop to allow other commands to process
-                await asyncio.sleep(0)
-                
-                completed_count += 1
-                
-                # Count approved/declined and track gateway stats
-                is_approved = ("CCN" in result and "✅" in result) or ("CVV" in result and "✅" in result)
+                async with results_lock:
+                    completed_count += 1
+                    is_approved = ("CCN" in result and "✅" in result) or ("CVV" in result and "✅" in result)
+                    if is_approved:
+                        approved_count += 1
+                    else:
+                        declined_count += 1
+                    current_completed = completed_count
+                    current_approved = approved_count
+                    current_declined = declined_count
+
+                # Forward to channel if approved
                 if is_approved:
-                    approved_count += 1
-                    # Forward to channel if approved
                     await forward_to_channel(context, card, result, gateway='pp')
-                else:
-                    declined_count += 1
-                
-                # Track gateway usage for each card in mass check
-                if GATEWAY_STATS_AVAILABLE:
-                    # Note: start/end tracking is handled in the async_ppcpgatewaycvv module
-                    # This is just for counting purposes
-                    pass
 
                 # Send result IMMEDIATELY
-                card_result = f"Card {completed_count}/{total_cards}:\n{result}"
-                await update.message.reply_text(card_result)
+                await safe_reply_text(
+                    update.message,
+                    f"Card {current_completed}/{total_cards}:\n{result}"
+                )
 
-                # Update progress
-                try:
-                    await status_msg.edit_text(
-                        f"⏳ Checking {total_cards} card(s)...\n"
-                        f"Progress: {completed_count}/{total_cards}\n"
-                        f"✅ Approved: {approved_count} | ❌ Declined: {declined_count}"
+                # Update progress (throttle to every 3 cards or last card)
+                if current_completed % 3 == 0 or current_completed == total_cards:
+                    await safe_edit_text(
+                        status_msg,
+                        f"⏳ Checking {total_cards} card(s) concurrently...\n"
+                        f"Progress: {current_completed}/{total_cards}\n"
+                        f"✅ Approved: {current_approved} | ❌ Declined: {current_declined}"
                     )
-                except:
-                    pass  # Ignore edit errors
 
-            # Check all cards with STREAMING results (10 concurrent)
+            # Check all cards with high concurrency streaming (50 concurrent for bare metal)
             summary = await check_ppcp_cards_streaming(
                 normalized_cards, 
                 sites, 
                 on_card_result, 
-                max_concurrent=10
+                max_concurrent=50
             )
 
             # Send final summary
@@ -2546,16 +2601,13 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if summary.get('errors', 0) > 0:
                 final_summary += f"\n⚠️ Errors: {summary.get('errors', 0)}"
 
-            await update.message.reply_text(final_summary)
+            await safe_reply_text(update.message, final_summary)
 
             # Delete the progress message
-            try:
-                await status_msg.delete()
-            except:
-                pass
+            await safe_delete_message(status_msg)
         finally:
             # Always unregister the mass check when done
-            unregister_mass_check(user_id)
+            unregister_mass_check(check_id)
 
 
 async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2649,49 +2701,42 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Update last check time
                 user_rate_limit[user_id] = current_time
 
-        # Send "Checking Please Wait" message
+        # Send "Checking Please Wait" message immediately
         checking_msg = await update.message.reply_text("⏳ Checking Please Wait... (PayPal Pro)")
 
-        # Use gateway semaphore for controlled concurrency
+        # No blocking semaphore - run_in_executor handles concurrency
         update_request_stats('ppro', 'start')
         try:
-            async with GATEWAY_SEMAPHORES['ppro']:
-                # Track gateway usage start
-                check_start_time = time.time()
-                if GATEWAY_STATS_AVAILABLE:
-                    track_request_start('ppro')
-                
-                # Check the single card using PayPal Pro gateway (run in executor to not block)
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(CARD_CHECK_EXECUTOR, lambda: paypalpro.check_card(normalized_cards[0], sites=sites))
-                formatted_result = paypalpro.format_result(result)
-                
-                # Track gateway usage end
-                check_elapsed = time.time() - check_start_time
-                if GATEWAY_STATS_AVAILABLE:
-                    track_request_end('ppro', success=result.get('approved', False) or result.get('status') != 'ERROR', response_time=check_elapsed)
+            check_start_time = time.time()
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_start('ppro')
+            
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(CARD_CHECK_EXECUTOR, lambda: paypalpro.check_card(normalized_cards[0], sites=sites))
+            formatted_result = paypalpro.format_result(result)
+            
+            check_elapsed = time.time() - check_start_time
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_end('ppro', success=result.get('approved', False) or result.get('status') != 'ERROR', response_time=check_elapsed)
 
             update_request_stats('ppro', 'end', success=result.get('approved', False))
             
-            # Edit the message with the result
-            await checking_msg.edit_text(formatted_result)
+            await safe_edit_text(checking_msg, formatted_result)
 
-            # Forward to channel if approved
             if result.get('approved', False):
                 await forward_to_channel(context, normalized_cards[0], formatted_result, gateway='ppro')
 
         except Exception as e:
             update_request_stats('ppro', 'end', success=False)
-            # Track failed request
             check_elapsed = time.time() - check_start_time if 'check_start_time' in locals() else 0
             if GATEWAY_STATS_AVAILABLE:
                 track_request_end('ppro', success=False, response_time=check_elapsed)
             error_message = f"❌ Error checking card: {str(e)}"
-            await checking_msg.edit_text(error_message)
+            await safe_edit_text(checking_msg, error_message)
             print(f"Error in /pro command: {str(e)}")
 
     else:
-        # Mass checking
+        # Mass checking - fully concurrent
         # Check if mass checking is enabled for PPRO
         if not is_mass_enabled('ppro'):
             await update.message.reply_text(
@@ -2720,83 +2765,85 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"⏳ {error_msg}")
             return
 
-        # Register this mass check
-        register_mass_check(user_id, total_cards)
+        # Register this mass check (returns unique check_id)
+        check_id = register_mass_check(user_id, total_cards)
 
-        # Send initial status message
+        # Send initial status message immediately
         status_msg = await update.message.reply_text(
-            f"⏳ Checking {total_cards} card(s) via PayPal Pro...\n"
+            f"⏳ Checking {total_cards} card(s) via PayPal Pro concurrently...\n"
             f"Progress: 0/{total_cards}"
         )
 
         try:
-            # Track progress
+            # Concurrent processing - all cards checked in parallel
             approved_count = 0
             declined_count = 0
+            completed_count = 0
+            results_lock = asyncio.Lock()
 
-            for idx, card in enumerate(normalized_cards, 1):
-                # Yield to event loop to allow other commands to process
-                await asyncio.sleep(0)
+            async def check_single_ppro(idx, card):
+                """Check a single card concurrently with semaphore control."""
+                nonlocal approved_count, declined_count, completed_count
                 
-                # Rate limiting for non-admin users (between cards in mass check)
-                if not is_admin and idx > 1:
-                    with user_rate_limit_lock:
-                        current_time = time.time()
-                        last_check_time = user_rate_limit.get(user_id, 0)
-                        time_since_last_check = current_time - last_check_time
+                async with GATEWAY_SEMAPHORES['ppro']:
+                    update_request_stats('ppro', 'start')
+                    try:
+                        card_check_start = time.time()
+                        if GATEWAY_STATS_AVAILABLE:
+                            track_request_start('ppro')
+                        
+                        loop = asyncio.get_event_loop()
+                        result = await loop.run_in_executor(
+                            CARD_CHECK_EXECUTOR, lambda c=card: paypalpro.check_card(c, sites=sites)
+                        )
+                        formatted_result = paypalpro.format_result(result)
+                        
+                        card_check_elapsed = time.time() - card_check_start
+                        is_approved = result.get('approved', False)
+                        if GATEWAY_STATS_AVAILABLE:
+                            track_request_end('ppro', success=is_approved or result.get('status') != 'ERROR', response_time=card_check_elapsed)
+                        update_request_stats('ppro', 'end', success=is_approved)
+                    except Exception as e:
+                        card_check_elapsed = time.time() - card_check_start if 'card_check_start' in locals() else 0
+                        if GATEWAY_STATS_AVAILABLE:
+                            track_request_end('ppro', success=False, response_time=card_check_elapsed)
+                        update_request_stats('ppro', 'end', success=False)
+                        formatted_result = f"❌ Error: {str(e)}"
+                        is_approved = False
 
-                        if time_since_last_check < RATE_LIMIT_SECONDS:
-                            wait_time = RATE_LIMIT_SECONDS - time_since_last_check
-                            await asyncio.sleep(wait_time)
-
-                        # Update last check time
-                        user_rate_limit[user_id] = time.time()
-
-                try:
-                    # Track gateway usage start
-                    card_check_start = time.time()
-                    if GATEWAY_STATS_AVAILABLE:
-                        track_request_start('ppro')
-                    
-                    # Check the card using run_in_executor with dedicated executor to not block event loop
-                    loop = asyncio.get_event_loop()
-                    result = await loop.run_in_executor(CARD_CHECK_EXECUTOR, lambda c=card: paypalpro.check_card(c, sites=sites))
-                    formatted_result = paypalpro.format_result(result)
-                    
-                    # Track gateway usage end
-                    card_check_elapsed = time.time() - card_check_start
-                    if GATEWAY_STATS_AVAILABLE:
-                        track_request_end('ppro', success=result.get('approved', False) or result.get('status') != 'ERROR', response_time=card_check_elapsed)
-
-                    # Count approved/declined
-                    if result.get('approved', False):
+                # Update counters
+                async with results_lock:
+                    completed_count += 1
+                    current_completed = completed_count
+                    if is_approved:
                         approved_count += 1
-                        # Forward to channel if approved
-                        await forward_to_channel(context, card, formatted_result, gateway='ppro')
                     else:
                         declined_count += 1
+                    current_approved = approved_count
+                    current_declined = declined_count
 
-                    # Send result immediately after checking
-                    card_result = f"Card {idx}/{total_cards}:\n{formatted_result}"
-                    await update.message.reply_text(card_result)
+                # Send result immediately
+                await safe_reply_text(
+                    update.message,
+                    f"Card {current_completed}/{total_cards}:\n{formatted_result}"
+                )
 
-                except Exception as e:
-                    # Track failed request
-                    card_check_elapsed = time.time() - card_check_start if 'card_check_start' in locals() else 0
-                    if GATEWAY_STATS_AVAILABLE:
-                        track_request_end('ppro', success=False, response_time=card_check_elapsed)
-                    declined_count += 1
-                    await update.message.reply_text(f"Card {idx}/{total_cards}:\n❌ Error: {str(e)}")
+                # Forward to channel if approved
+                if is_approved:
+                    await forward_to_channel(context, card, formatted_result, gateway='ppro')
 
-                # Update progress
-                try:
-                    await status_msg.edit_text(
-                        f"⏳ Checking {total_cards} card(s) via PayPal Pro...\n"
-                        f"Progress: {idx}/{total_cards}\n"
-                        f"✅ Approved: {approved_count} | ❌ Declined: {declined_count}"
+                # Update progress (throttle to every 3 cards or last card)
+                if current_completed % 3 == 0 or current_completed == total_cards:
+                    await safe_edit_text(
+                        status_msg,
+                        f"⏳ Checking {total_cards} card(s) via PayPal Pro concurrently...\n"
+                        f"Progress: {current_completed}/{total_cards}\n"
+                        f"✅ Approved: {current_approved} | ❌ Declined: {current_declined}"
                     )
-                except:
-                    pass  # Ignore edit errors
+
+            # Launch all card checks concurrently
+            tasks = [check_single_ppro(idx, card) for idx, card in enumerate(normalized_cards, 1)]
+            await asyncio.gather(*tasks, return_exceptions=True)
 
             # Send final summary
             summary = f"📊 PayPal Pro Mass Check Complete\n\n"
@@ -2804,16 +2851,13 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             summary += f"✅ Approved: {approved_count}\n"
             summary += f"❌ Declined: {declined_count}"
 
-            await update.message.reply_text(summary)
+            await safe_reply_text(update.message, summary)
 
             # Delete the progress message
-            try:
-                await status_msg.delete()
-            except:
-                pass
+            await safe_delete_message(status_msg)
         finally:
             # Always unregister the mass check when done
-            unregister_mass_check(user_id)
+            unregister_mass_check(check_id)
 
 
 def normalize_stripe_card_format(card_input):
@@ -3008,51 +3052,42 @@ async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Update last check time
                 user_rate_limit[user_id] = current_time
 
-        # Send "Checking Please Wait" message
+        # Send "Checking Please Wait" message immediately
         checking_msg = await update.message.reply_text("⏳ Checking Please Wait... (Stripe)")
 
-        # Use gateway semaphore for controlled concurrency
+        # No blocking semaphore - run_in_executor handles concurrency
         update_request_stats('st', 'start')
         try:
-            async with GATEWAY_SEMAPHORES['st']:
-                # Track gateway usage start
-                check_start_time = time.time()
-                if GATEWAY_STATS_AVAILABLE:
-                    track_request_start('st')
-                
-                # Run the card check in executor with dedicated executor to not block
-                loop = asyncio.get_event_loop()
-                raw_result = await loop.run_in_executor(
-                    CARD_CHECK_EXECUTOR, 
-                    lambda: allstripecvv.process_card(normalized_cards[0], sites_str)
-                )
-                
-                elapsed_time = time.time() - check_start_time
-                
-                # Format result
-                formatted_result, is_approved = format_stripe_result(raw_result, normalized_cards[0], elapsed_time)
-                
-                # Track gateway usage end
-                if GATEWAY_STATS_AVAILABLE:
-                    track_request_end('st', success=is_approved or "❌" not in raw_result[:20], response_time=elapsed_time)
+            check_start_time = time.time()
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_start('st')
+            
+            loop = asyncio.get_event_loop()
+            raw_result = await loop.run_in_executor(
+                CARD_CHECK_EXECUTOR, 
+                lambda: allstripecvv.process_card(normalized_cards[0], sites_str)
+            )
+            
+            elapsed_time = time.time() - check_start_time
+            formatted_result, is_approved = format_stripe_result(raw_result, normalized_cards[0], elapsed_time)
+            
+            if GATEWAY_STATS_AVAILABLE:
+                track_request_end('st', success=is_approved or "❌" not in raw_result[:20], response_time=elapsed_time)
 
             update_request_stats('st', 'end', success=is_approved)
             
-            # Edit the message with the result
-            await checking_msg.edit_text(formatted_result)
+            await safe_edit_text(checking_msg, formatted_result)
 
-            # Forward to channel if approved (CVV or CCN)
             if is_approved:
                 await forward_to_channel(context, normalized_cards[0], formatted_result, gateway='st')
 
         except Exception as e:
             update_request_stats('st', 'end', success=False)
-            # Track failed request
             check_elapsed = time.time() - check_start_time if 'check_start_time' in locals() else 0
             if GATEWAY_STATS_AVAILABLE:
                 track_request_end('st', success=False, response_time=check_elapsed)
             error_message = f"❌ Error checking card: {str(e)}"
-            await checking_msg.edit_text(error_message)
+            await safe_edit_text(checking_msg, error_message)
             print(f"Error in /st command: {str(e)}")
 
     else:
@@ -3085,81 +3120,86 @@ async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"⏳ {error_msg}")
             return
 
-        # Register this mass check
-        register_mass_check(user_id, total_cards)
+        # Register this mass check (returns unique check_id)
+        check_id = register_mass_check(user_id, total_cards)
 
-        # Send initial status message
+        # Send initial status message immediately
         status_msg = await update.message.reply_text(
-            f"⏳ Checking {total_cards} card(s) via Stripe...\n"
+            f"⏳ Checking {total_cards} card(s) via Stripe concurrently...\n"
             f"Progress: 0/{total_cards}"
         )
 
         try:
-            # Track progress
+            # Concurrent processing - all cards checked in parallel
             approved_count = 0
             declined_count = 0
+            completed_count = 0
+            results_lock = asyncio.Lock()
 
-            for idx, card in enumerate(normalized_cards, 1):
-                # Yield to event loop to allow other commands to process
-                await asyncio.sleep(0)
+            async def check_single_stripe(idx, card):
+                """Check a single card concurrently with semaphore control."""
+                nonlocal approved_count, declined_count, completed_count
                 
-                # Rate limiting for non-admin users (between cards in mass check)
-                if not is_admin and idx > 1:
-                    # Use gateway-specific interval
-                    st_interval = get_gateway_interval('st')
-                    await asyncio.sleep(st_interval)
+                async with GATEWAY_SEMAPHORES['st']:
+                    update_request_stats('st', 'start')
+                    try:
+                        card_check_start = time.time()
+                        if GATEWAY_STATS_AVAILABLE:
+                            track_request_start('st')
+                        
+                        loop = asyncio.get_event_loop()
+                        raw_result = await loop.run_in_executor(
+                            CARD_CHECK_EXECUTOR,
+                            lambda c=card: allstripecvv.process_card(c, sites_str)
+                        )
+                        
+                        card_check_elapsed = time.time() - card_check_start
+                        formatted_result, is_approved = format_stripe_result(raw_result, card, card_check_elapsed)
+                        
+                        if GATEWAY_STATS_AVAILABLE:
+                            track_request_end('st', success=is_approved, response_time=card_check_elapsed)
+                        update_request_stats('st', 'end', success=is_approved)
+                    except Exception as e:
+                        card_check_elapsed = time.time() - card_check_start if 'card_check_start' in locals() else 0
+                        if GATEWAY_STATS_AVAILABLE:
+                            track_request_end('st', success=False, response_time=card_check_elapsed)
+                        update_request_stats('st', 'end', success=False)
+                        formatted_result = f"❌ Error: {str(e)}"
+                        is_approved = False
 
-                try:
-                    # Track gateway usage start
-                    card_check_start = time.time()
-                    if GATEWAY_STATS_AVAILABLE:
-                        track_request_start('st')
-                    
-                    # Check the card using run_in_executor with dedicated executor to not block event loop
-                    loop = asyncio.get_event_loop()
-                    raw_result = await loop.run_in_executor(
-                        CARD_CHECK_EXECUTOR, 
-                        lambda c=card: allstripecvv.process_card(c, sites_str)
-                    )
-                    
-                    card_check_elapsed = time.time() - card_check_start
-                    
-                    # Format result
-                    formatted_result, is_approved = format_stripe_result(raw_result, card, card_check_elapsed)
-                    
-                    # Track gateway usage end
-                    if GATEWAY_STATS_AVAILABLE:
-                        track_request_end('st', success=is_approved, response_time=card_check_elapsed)
-
-                    # Count approved/declined
+                # Update counters
+                async with results_lock:
+                    completed_count += 1
+                    current_completed = completed_count
                     if is_approved:
                         approved_count += 1
-                        # Forward to channel if approved
-                        await forward_to_channel(context, card, formatted_result, gateway='st')
                     else:
                         declined_count += 1
+                    current_approved = approved_count
+                    current_declined = declined_count
 
-                    # Send result immediately after checking
-                    card_result = f"Card {idx}/{total_cards}:\n{formatted_result}"
-                    await update.message.reply_text(card_result)
+                # Send result immediately
+                await safe_reply_text(
+                    update.message,
+                    f"Card {current_completed}/{total_cards}:\n{formatted_result}"
+                )
 
-                except Exception as e:
-                    # Track failed request
-                    card_check_elapsed = time.time() - card_check_start if 'card_check_start' in locals() else 0
-                    if GATEWAY_STATS_AVAILABLE:
-                        track_request_end('st', success=False, response_time=card_check_elapsed)
-                    declined_count += 1
-                    await update.message.reply_text(f"Card {idx}/{total_cards}:\n❌ Error: {str(e)}")
+                # Forward to channel if approved
+                if is_approved:
+                    await forward_to_channel(context, card, formatted_result, gateway='st')
 
-                # Update progress
-                try:
-                    await status_msg.edit_text(
-                        f"⏳ Checking {total_cards} card(s) via Stripe...\n"
-                        f"Progress: {idx}/{total_cards}\n"
-                        f"✅ Approved: {approved_count} | ❌ Declined: {declined_count}"
+                # Update progress (throttle to every 3 cards or last card)
+                if current_completed % 3 == 0 or current_completed == total_cards:
+                    await safe_edit_text(
+                        status_msg,
+                        f"⏳ Checking {total_cards} card(s) via Stripe concurrently...\n"
+                        f"Progress: {current_completed}/{total_cards}\n"
+                        f"✅ Approved: {current_approved} | ❌ Declined: {current_declined}"
                     )
-                except:
-                    pass  # Ignore edit errors
+
+            # Launch all card checks concurrently
+            tasks = [check_single_stripe(idx, card) for idx, card in enumerate(normalized_cards, 1)]
+            await asyncio.gather(*tasks, return_exceptions=True)
 
             # Send final summary
             summary = f"📊 Stripe Mass Check Complete\n\n"
@@ -3167,16 +3207,13 @@ async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             summary += f"✅ Approved: {approved_count}\n"
             summary += f"❌ Declined: {declined_count}"
 
-            await update.message.reply_text(summary)
+            await safe_reply_text(update.message, summary)
 
             # Delete the progress message
-            try:
-                await status_msg.delete()
-            except:
-                pass
+            await safe_delete_message(status_msg)
         finally:
             # Always unregister the mass check when done
-            unregister_mass_check(user_id)
+            unregister_mass_check(check_id)
 
 
 async def admin_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
