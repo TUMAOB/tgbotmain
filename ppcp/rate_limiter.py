@@ -57,6 +57,7 @@ class DomainRateLimiter:
         limiter = await self.get_limiter(domain)
         await limiter.acquire(tokens)
 
-# Global rate limiter instance
-global_rate_limiter = RateLimiter()
-domain_rate_limiter = DomainRateLimiter()
+# Global rate limiter instance - Optimized for bare metal server
+# Increased limits for handling hundreds of concurrent users
+global_rate_limiter = RateLimiter(rate_limit_per_second=100, burst_limit=200)
+domain_rate_limiter = DomainRateLimiter(default_rate=30, default_burst=60)

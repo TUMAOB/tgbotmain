@@ -60,17 +60,17 @@ _bin_cache = {}  # Simple dict cache for BIN info
 
 # Configuration
 class Config:
-    """Configuration settings for production use - optimized for speed"""
+    """Configuration settings for production use - optimized for bare metal server with high concurrency"""
     TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '7723561160:AAHZp0guO69EmC_BumauDsDeseTvh7GY3qA')
     CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '-1003171561914')
-    TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '15'))  # Reduced for faster response
-    MAX_CONCURRENT_REQUESTS = int(os.getenv('MAX_CONCURRENT_REQUESTS', '50'))  # Optimized concurrency
+    TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '20'))  # Balanced timeout
+    MAX_CONCURRENT_REQUESTS = int(os.getenv('MAX_CONCURRENT_REQUESTS', '200'))  # High concurrency for bare metal
     MAX_RETRIES = int(os.getenv('MAX_RETRIES', '2'))  # Reduced retries for speed
-    RETRY_DELAY = float(os.getenv('RETRY_DELAY', '0.5'))  # Faster retry
-    RATE_LIMIT_PER_SECOND = int(os.getenv('RATE_LIMIT_PER_SECOND', '20'))  # Increased rate limit
+    RETRY_DELAY = float(os.getenv('RETRY_DELAY', '0.3'))  # Faster retry
+    RATE_LIMIT_PER_SECOND = int(os.getenv('RATE_LIMIT_PER_SECOND', '100'))  # High rate limit for bare metal
     BIN_CHECK_TIMEOUT = int(os.getenv('BIN_CHECK_TIMEOUT', '5'))  # Faster BIN check
-    CONNECTION_LIMIT = int(os.getenv('CONNECTION_LIMIT', '100'))  # Connection pool size
-    CONNECTION_LIMIT_PER_HOST = int(os.getenv('CONNECTION_LIMIT_PER_HOST', '20'))  # Per-host limit
+    CONNECTION_LIMIT = int(os.getenv('CONNECTION_LIMIT', '500'))  # Large connection pool for bare metal
+    CONNECTION_LIMIT_PER_HOST = int(os.getenv('CONNECTION_LIMIT_PER_HOST', '50'))  # Higher per-host limit
 
 # Address data
 class AddressData:
@@ -1023,28 +1023,33 @@ class AsyncCardChecker:
 
 
 async def create_session() -> aiohttp.ClientSession:
-    """Create a shared session with optimized connection pooling for production"""
+    """Create a shared session with optimized connection pooling for bare metal server"""
     connector = aiohttp.TCPConnector(
         limit=Config.CONNECTION_LIMIT,
         limit_per_host=Config.CONNECTION_LIMIT_PER_HOST,
         ttl_dns_cache=600,
         use_dns_cache=True,
         ssl=False,
-        keepalive_timeout=30,
+        keepalive_timeout=60,  # Longer keepalive for connection reuse
         enable_cleanup_closed=True,
-        force_close=False
+        force_close=False,
+        # Additional optimizations for high concurrency
+        resolver=None,  # Use default resolver
     )
     
     timeout = aiohttp.ClientTimeout(
         total=Config.TIMEOUT,
-        connect=5,
-        sock_read=10
+        connect=10,  # Slightly longer connect timeout for reliability
+        sock_read=15,  # Longer read timeout
+        sock_connect=10
     )
     
     return aiohttp.ClientSession(
         connector=connector, 
         timeout=timeout,
-        trust_env=True
+        trust_env=True,
+        # Enable automatic decompression
+        auto_decompress=True,
     )
 
 

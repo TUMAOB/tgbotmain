@@ -24,8 +24,9 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 
 # Create a dedicated ThreadPoolExecutor for card checking operations
 # This prevents blocking the event loop when multiple users check cards simultaneously
-# Using 20 workers allows up to 20 concurrent card checks without blocking
-CARD_CHECK_EXECUTOR = ThreadPoolExecutor(max_workers=20, thread_name_prefix="card_checker")
+# Using 200 workers for bare metal server - allows massive concurrent card checks
+# Optimized for handling hundreds of users checking simultaneously
+CARD_CHECK_EXECUTOR = ThreadPoolExecutor(max_workers=200, thread_name_prefix="card_checker")
 
 # Register cleanup function to properly shutdown the executor on exit
 def _cleanup_executor():
@@ -52,6 +53,55 @@ try:
 except ImportError:
     GATEWAY_STATS_AVAILABLE = False
     print("Warning: Gateway stats module not available")
+
+# Import concurrency manager for high-performance request handling
+try:
+    from core.concurrency_manager import (
+        concurrency_manager, get_concurrency_manager,
+        submit_card_check, get_system_stats
+    )
+    CONCURRENCY_MANAGER_AVAILABLE = True
+except ImportError:
+    CONCURRENCY_MANAGER_AVAILABLE = False
+    print("Warning: Concurrency manager module not available")
+
+# Per-gateway semaphores for controlling concurrent requests
+# These allow fine-grained control over how many requests each gateway handles simultaneously
+# Optimized for bare metal server - high limits
+GATEWAY_SEMAPHORES = {
+    'b3': asyncio.Semaphore(150),   # Braintree Auth - 150 concurrent
+    'pp': asyncio.Semaphore(150),   # PPCP - 150 concurrent
+    'ppro': asyncio.Semaphore(150), # PayPal Pro - 150 concurrent
+    'st': asyncio.Semaphore(150),   # Stripe - 150 concurrent
+}
+
+# Global request counter for monitoring
+REQUEST_STATS = {
+    'b3': {'active': 0, 'total': 0, 'success': 0, 'failed': 0},
+    'pp': {'active': 0, 'total': 0, 'success': 0, 'failed': 0},
+    'ppro': {'active': 0, 'total': 0, 'success': 0, 'failed': 0},
+    'st': {'active': 0, 'total': 0, 'success': 0, 'failed': 0},
+}
+REQUEST_STATS_LOCK = threading.Lock()
+
+def update_request_stats(gateway: str, action: str, success: bool = True):
+    """Update request statistics for a gateway."""
+    with REQUEST_STATS_LOCK:
+        if gateway in REQUEST_STATS:
+            if action == 'start':
+                REQUEST_STATS[gateway]['active'] += 1
+                REQUEST_STATS[gateway]['total'] += 1
+            elif action == 'end':
+                REQUEST_STATS[gateway]['active'] = max(0, REQUEST_STATS[gateway]['active'] - 1)
+                if success:
+                    REQUEST_STATS[gateway]['success'] += 1
+                else:
+                    REQUEST_STATS[gateway]['failed'] += 1
+
+def get_request_stats() -> dict:
+    """Get current request statistics."""
+    with REQUEST_STATS_LOCK:
+        return dict(REQUEST_STATS)
 
 # Import system manager for backup/restore/update
 try:
@@ -425,10 +475,11 @@ active_mass_checks = {}
 active_mass_checks_lock = threading.Lock()
 
 # Maximum concurrent mass checks per user (to prevent single user from blocking)
-MAX_CONCURRENT_MASS_CHECKS_PER_USER = 1
+MAX_CONCURRENT_MASS_CHECKS_PER_USER = 3
 
-# Maximum total concurrent mass checks (to prevent system overload)
-MAX_TOTAL_CONCURRENT_MASS_CHECKS = 5
+# Maximum total concurrent mass checks (optimized for bare metal server)
+# Increased significantly to handle hundreds of users
+MAX_TOTAL_CONCURRENT_MASS_CHECKS = 50
 
 # REMOVED: Global variables for resource selection (now using per-request local variables)
 # This prevents conflicts when multiple users check cards simultaneously
@@ -1738,30 +1789,36 @@ async def check_ppcp_mass_cards(card_list, site_urls, max_concurrent=10):
         return [f"❌ Error in mass check: {str(e)}"] * len(card_list)
 
 
-async def check_ppcp_cards_streaming(card_list, site_urls, on_result_callback, max_concurrent=10):
+async def check_ppcp_cards_streaming(card_list, site_urls, on_result_callback, max_concurrent=50):
     """
     Check multiple cards using async PPCP gateway with streaming results.
     Each result is sent immediately via the callback.
+    Optimized for bare metal server with high concurrency.
     
     Args:
         card_list: List of cards to check
         site_urls: List of site URLs
         on_result_callback: Async callback function(index, card, result)
-        max_concurrent: Maximum concurrent checks
+        max_concurrent: Maximum concurrent checks (default 50 for bare metal)
         
     Returns:
         Summary dict with counts
     """
+    # Use gateway semaphore to control overall concurrency
+    update_request_stats('pp', 'start')
     try:
-        from ppcp.async_ppcpgatewaycvv import check_cards_with_immediate_callback
-        summary = await check_cards_with_immediate_callback(
-            card_list, 
-            site_urls, 
-            on_result_callback, 
-            max_concurrent
-        )
+        async with GATEWAY_SEMAPHORES['pp']:
+            from ppcp.async_ppcpgatewaycvv import check_cards_with_immediate_callback
+            summary = await check_cards_with_immediate_callback(
+                card_list, 
+                site_urls, 
+                on_result_callback, 
+                max_concurrent
+            )
+        update_request_stats('pp', 'end', success=True)
         return summary
     except Exception as e:
+        update_request_stats('pp', 'end', success=False)
         # Fallback: send error for each card
         for i, card in enumerate(card_list):
             await on_result_callback(i, card, f"❌ Error in mass check: {str(e)}")
@@ -1994,10 +2051,22 @@ async def b3_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Send "Checking Please Wait" message
     checking_msg = await update.message.reply_text("⏳ Checking Please Wait...")
 
-    # Check the card using run_in_executor to prevent blocking the event loop
-    # This allows other users to use the bot while this check is in progress
-    loop = asyncio.get_event_loop()
-    result, error_type, site_name = await loop.run_in_executor(CARD_CHECK_EXECUTOR, check_card, card_details)
+    # Use gateway semaphore to control concurrent requests
+    # This prevents overwhelming the gateway while allowing high concurrency
+    update_request_stats('b3', 'start')
+    try:
+        async with GATEWAY_SEMAPHORES['b3']:
+            # Check the card using run_in_executor to prevent blocking the event loop
+            # This allows other users to use the bot while this check is in progress
+            loop = asyncio.get_event_loop()
+            result, error_type, site_name = await loop.run_in_executor(CARD_CHECK_EXECUTOR, check_card, card_details)
+        
+        update_request_stats('b3', 'end', success=("APPROVED" in result))
+    except Exception as e:
+        update_request_stats('b3', 'end', success=False)
+        result = f"❌ Error: {str(e)}"
+        error_type = 'exception'
+        site_name = None
 
     # Edit the message with the result
     await checking_msg.edit_text(result)
@@ -2304,39 +2373,44 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Send "Checking Please Wait" message
         checking_msg = await update.message.reply_text("⏳ Checking Please Wait...")
 
+        # Use gateway semaphore for controlled concurrency
+        update_request_stats('pp', 'start')
         try:
-            # Track gateway usage start
-            pp_check_start = time.time()
-            if GATEWAY_STATS_AVAILABLE:
-                track_request_start('pp')
-            
-            # Check the single card using async ppcp gateway
-            # Load sites from sites.txt file using absolute path
-            sites = []
-            ppcp_sites_file = os.path.join(_BASE_DIR, 'ppcp', 'sites.txt')
-            root_sites_file = os.path.join(_BASE_DIR, 'sites.txt')
-            if os.path.exists(ppcp_sites_file):
-                with open(ppcp_sites_file, 'r') as f:
-                    sites = [line.strip() for line in f if line.strip()]
-            elif os.path.exists(root_sites_file):
-                # Load from the project root if ppcp folder is not present in the path
-                with open(root_sites_file, 'r') as f:
-                    sites = [line.strip() for line in f if line.strip()]
+            async with GATEWAY_SEMAPHORES['pp']:
+                # Track gateway usage start
+                pp_check_start = time.time()
+                if GATEWAY_STATS_AVAILABLE:
+                    track_request_start('pp')
+                
+                # Check the single card using async ppcp gateway
+                # Load sites from sites.txt file using absolute path
+                sites = []
+                ppcp_sites_file = os.path.join(_BASE_DIR, 'ppcp', 'sites.txt')
+                root_sites_file = os.path.join(_BASE_DIR, 'sites.txt')
+                if os.path.exists(ppcp_sites_file):
+                    with open(ppcp_sites_file, 'r') as f:
+                        sites = [line.strip() for line in f if line.strip()]
+                elif os.path.exists(root_sites_file):
+                    # Load from the project root if ppcp folder is not present in the path
+                    with open(root_sites_file, 'r') as f:
+                        sites = [line.strip() for line in f if line.strip()]
 
-            if not sites:
-                result = "❌ No sites found!"
-                pp_success = False
-            else:
-                from ppcp.async_ppcpgatewaycvv import check_single_card
-                result = await check_single_card(normalized_cards[0], sites)
-                # Determine success based on result
-                pp_success = ("CCN" in result and "✅" in result) or ("CVV" in result and "✅" in result)
-            
-            # Track gateway usage end
-            pp_check_elapsed = time.time() - pp_check_start
-            if GATEWAY_STATS_AVAILABLE:
-                track_request_end('pp', success=pp_success or "❌" not in result[:20], response_time=pp_check_elapsed)
+                if not sites:
+                    result = "❌ No sites found!"
+                    pp_success = False
+                else:
+                    from ppcp.async_ppcpgatewaycvv import check_single_card
+                    result = await check_single_card(normalized_cards[0], sites)
+                    # Determine success based on result
+                    pp_success = ("CCN" in result and "✅" in result) or ("CVV" in result and "✅" in result)
+                
+                # Track gateway usage end
+                pp_check_elapsed = time.time() - pp_check_start
+                if GATEWAY_STATS_AVAILABLE:
+                    track_request_end('pp', success=pp_success or "❌" not in result[:20], response_time=pp_check_elapsed)
 
+            update_request_stats('pp', 'end', success=pp_success)
+            
             # Edit the message with the result
             await checking_msg.edit_text(result)
 
@@ -2344,6 +2418,7 @@ async def pp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await forward_to_channel(context, normalized_cards[0], result, gateway='pp')
 
         except Exception as e:
+            update_request_stats('pp', 'end', success=False)
             # Track failed request
             pp_check_elapsed = time.time() - pp_check_start if 'pp_check_start' in locals() else 0
             if GATEWAY_STATS_AVAILABLE:
@@ -2574,22 +2649,27 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Send "Checking Please Wait" message
         checking_msg = await update.message.reply_text("⏳ Checking Please Wait... (PayPal Pro)")
 
+        # Use gateway semaphore for controlled concurrency
+        update_request_stats('ppro', 'start')
         try:
-            # Track gateway usage start
-            check_start_time = time.time()
-            if GATEWAY_STATS_AVAILABLE:
-                track_request_start('ppro')
-            
-            # Check the single card using PayPal Pro gateway (run in executor to not block)
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(CARD_CHECK_EXECUTOR, lambda: paypalpro.check_card(normalized_cards[0], sites=sites))
-            formatted_result = paypalpro.format_result(result)
-            
-            # Track gateway usage end
-            check_elapsed = time.time() - check_start_time
-            if GATEWAY_STATS_AVAILABLE:
-                track_request_end('ppro', success=result.get('approved', False) or result.get('status') != 'ERROR', response_time=check_elapsed)
+            async with GATEWAY_SEMAPHORES['ppro']:
+                # Track gateway usage start
+                check_start_time = time.time()
+                if GATEWAY_STATS_AVAILABLE:
+                    track_request_start('ppro')
+                
+                # Check the single card using PayPal Pro gateway (run in executor to not block)
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(CARD_CHECK_EXECUTOR, lambda: paypalpro.check_card(normalized_cards[0], sites=sites))
+                formatted_result = paypalpro.format_result(result)
+                
+                # Track gateway usage end
+                check_elapsed = time.time() - check_start_time
+                if GATEWAY_STATS_AVAILABLE:
+                    track_request_end('ppro', success=result.get('approved', False) or result.get('status') != 'ERROR', response_time=check_elapsed)
 
+            update_request_stats('ppro', 'end', success=result.get('approved', False))
+            
             # Edit the message with the result
             await checking_msg.edit_text(formatted_result)
 
@@ -2598,6 +2678,7 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await forward_to_channel(context, normalized_cards[0], formatted_result, gateway='ppro')
 
         except Exception as e:
+            update_request_stats('ppro', 'end', success=False)
             # Track failed request
             check_elapsed = time.time() - check_start_time if 'check_start_time' in locals() else 0
             if GATEWAY_STATS_AVAILABLE:
@@ -2927,28 +3008,33 @@ async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Send "Checking Please Wait" message
         checking_msg = await update.message.reply_text("⏳ Checking Please Wait... (Stripe)")
 
+        # Use gateway semaphore for controlled concurrency
+        update_request_stats('st', 'start')
         try:
-            # Track gateway usage start
-            check_start_time = time.time()
-            if GATEWAY_STATS_AVAILABLE:
-                track_request_start('st')
-            
-            # Run the card check in executor with dedicated executor to not block
-            loop = asyncio.get_event_loop()
-            raw_result = await loop.run_in_executor(
-                CARD_CHECK_EXECUTOR, 
-                lambda: allstripecvv.process_card(normalized_cards[0], sites_str)
-            )
-            
-            elapsed_time = time.time() - check_start_time
-            
-            # Format result
-            formatted_result, is_approved = format_stripe_result(raw_result, normalized_cards[0], elapsed_time)
-            
-            # Track gateway usage end
-            if GATEWAY_STATS_AVAILABLE:
-                track_request_end('st', success=is_approved or "❌" not in raw_result[:20], response_time=elapsed_time)
+            async with GATEWAY_SEMAPHORES['st']:
+                # Track gateway usage start
+                check_start_time = time.time()
+                if GATEWAY_STATS_AVAILABLE:
+                    track_request_start('st')
+                
+                # Run the card check in executor with dedicated executor to not block
+                loop = asyncio.get_event_loop()
+                raw_result = await loop.run_in_executor(
+                    CARD_CHECK_EXECUTOR, 
+                    lambda: allstripecvv.process_card(normalized_cards[0], sites_str)
+                )
+                
+                elapsed_time = time.time() - check_start_time
+                
+                # Format result
+                formatted_result, is_approved = format_stripe_result(raw_result, normalized_cards[0], elapsed_time)
+                
+                # Track gateway usage end
+                if GATEWAY_STATS_AVAILABLE:
+                    track_request_end('st', success=is_approved or "❌" not in raw_result[:20], response_time=elapsed_time)
 
+            update_request_stats('st', 'end', success=is_approved)
+            
             # Edit the message with the result
             await checking_msg.edit_text(formatted_result)
 
@@ -2957,6 +3043,7 @@ async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await forward_to_channel(context, normalized_cards[0], formatted_result, gateway='st')
 
         except Exception as e:
+            update_request_stats('st', 'end', success=False)
             # Track failed request
             check_elapsed = time.time() - check_start_time if 'check_start_time' in locals() else 0
             if GATEWAY_STATS_AVAILABLE:
