@@ -346,8 +346,9 @@ class MassCheckLimiter:
             }
 
 
-# Global instances
-global_rate_limiter = AsyncRateLimiter(rate_per_second=20.0, burst_capacity=50.0)
-domain_rate_limiter = DomainRateLimiter(default_rate=5.0, default_burst=10.0)
-user_rate_limiter = UserRateLimiter(rate_limit_seconds=1.0)
-mass_check_limiter = MassCheckLimiter(max_per_user=1, max_total=5)
+# Global instances - Optimized for bare metal server with high concurrency
+# Significantly increased limits to handle hundreds of simultaneous users
+global_rate_limiter = AsyncRateLimiter(rate_per_second=200.0, burst_capacity=500.0)
+domain_rate_limiter = DomainRateLimiter(default_rate=50.0, default_burst=100.0)
+user_rate_limiter = UserRateLimiter(rate_limit_seconds=0.5)  # Faster rate limit
+mass_check_limiter = MassCheckLimiter(max_per_user=3, max_total=50)
