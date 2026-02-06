@@ -1677,18 +1677,23 @@ def check_card(cc_line):
         bin_info = get_bin_info(n[:6]) or {}
 
         print(f"DEBUG: Emoji in response: {bin_info.get('emoji', '🏳️')}")  # Debug print emoji
+        status_line = "APPROVED ✅" if approved else "DECLINED ❌"
         response_text = f"""
-{status} {'❌' if not approved else '✅'}
+{status_line}
 
 𝗖𝗖 ⇾ {n}|{mm}|{yy}|{cvc}
+
 𝗚𝗮𝘁𝗲𝘄𝗮𝘆 ⇾ Braintree Auth
+
 𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 ⇾ {reason}
 
 𝗕𝗜𝗡 𝗜𝗻𝗳𝗼: {bin_info.get('brand', 'UNKNOWN')} - {bin_info.get('type', 'UNKNOWN')} - {bin_info.get('level', 'UNKNOWN')}
+
 𝗕𝗮𝗻𝗸: {bin_info.get('bank', 'UNKNOWN')}
+
 𝗖𝗼𝘂𝗻𝘁𝗿𝘆: {bin_info.get('country', 'UNKNOWN')} {bin_info.get('emoji', '🏳️')}
 
-𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀 [ 0 ]
+𝗧𝗼𝗼𝗸 {elapsed_time:.2f} 𝘀𝗲𝗰𝗼𝗻𝗱𝘀
 
 𝗕𝗼𝘁 𝗯𝘆 : @TUMAOB
 """
