@@ -442,6 +442,9 @@ GATEWAY_INTERVAL_SETTINGS_LOCK_FILE = os.path.join(_BASE_DIR, 'gateway_interval_
 BOT_SETTINGS_FILE = os.path.join(_BASE_DIR, 'bot_settings.json')
 BOT_SETTINGS_LOCK_FILE = os.path.join(_BASE_DIR, 'bot_settings.json.lock')
 
+# PID file to prevent multiple bot instances (prevents 409 Conflict on reload)
+BOT_PID_FILE = os.path.join(_BASE_DIR, 'bot.pid')
+
 # Forward channel ID (set to None to disable forwarding, or use channel username like '@yourchannel' or channel ID like -1001234567890)
 FORWARD_CHANNEL_ID = -1003865829143  # Replace with your channel ID or username
 
@@ -7149,9 +7152,98 @@ async def send_restart_confirmation(application):
         clear_restart_state()
 
 
+# ============= SINGLE INSTANCE MANAGEMENT =============
+
+def _read_pid_file():
+    """Read the PID from the bot.pid file. Returns None if not found or invalid."""
+    try:
+        if os.path.exists(BOT_PID_FILE):
+            with open(BOT_PID_FILE, 'r') as f:
+                pid_str = f.read().strip()
+                if pid_str.isdigit():
+                    return int(pid_str)
+    except Exception:
+        pass
+    return None
+
+
+def _is_process_running(pid):
+    """Check if a process with the given PID is still running."""
+    try:
+        os.kill(pid, 0)  # Signal 0 doesn't kill, just checks existence
+        return True
+    except OSError:
+        return False
+
+
+def _kill_existing_bot():
+    """
+    Kill any existing bot process found in the PID file.
+    This prevents the 409 Conflict error when reloading in tmux.
+    """
+    old_pid = _read_pid_file()
+    if old_pid is None:
+        return
+
+    # Don't kill ourselves
+    if old_pid == os.getpid():
+        return
+
+    if not _is_process_running(old_pid):
+        print(f"ℹ️ Stale PID file found (PID {old_pid} not running), cleaning up.")
+        _cleanup_pid_file()
+        return
+
+    print(f"⚠️ Found existing bot process (PID {old_pid}). Terminating it to avoid 409 Conflict...")
+    try:
+        os.kill(old_pid, signal.SIGTERM)
+        # Wait up to 5 seconds for graceful shutdown
+        for _ in range(50):
+            if not _is_process_running(old_pid):
+                print(f"✅ Old bot process (PID {old_pid}) terminated gracefully.")
+                return
+            time.sleep(0.1)
+        # Force kill if still running
+        print(f"⚠️ Force killing old bot process (PID {old_pid})...")
+        os.kill(old_pid, signal.SIGKILL)
+        time.sleep(0.5)
+        print(f"✅ Old bot process (PID {old_pid}) force killed.")
+    except ProcessLookupError:
+        print(f"ℹ️ Old bot process (PID {old_pid}) already exited.")
+    except PermissionError:
+        print(f"❌ No permission to kill old bot process (PID {old_pid}). Please kill it manually.")
+    except Exception as e:
+        print(f"❌ Error killing old bot process: {e}")
+
+
+def _write_pid_file():
+    """Write the current process PID to the PID file."""
+    try:
+        with open(BOT_PID_FILE, 'w') as f:
+            f.write(str(os.getpid()))
+    except Exception as e:
+        print(f"⚠️ Failed to write PID file: {e}")
+
+
+def _cleanup_pid_file():
+    """Remove the PID file on shutdown."""
+    try:
+        if os.path.exists(BOT_PID_FILE):
+            os.remove(BOT_PID_FILE)
+    except Exception:
+        pass
+
+
 def main():
     """Main function to run the bot"""
     print("🚀 Starting Telegram Bot...")
+    
+    # Kill any existing bot instance to prevent 409 Conflict on reload/restart
+    _kill_existing_bot()
+    
+    # Write our PID so future restarts can find and kill us
+    _write_pid_file()
+    atexit.register(_cleanup_pid_file)
     
     # Get bot token from environment variable or file
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -7228,9 +7320,9 @@ def main():
     
     application.post_init = post_init
     
-    # Start the bot
+    # Start the bot (drop_pending_updates avoids 409 Conflict from stale getUpdates sessions)
     print("✅ Bot is running...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
