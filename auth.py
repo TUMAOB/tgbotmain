@@ -15,10 +15,27 @@ import os
 import glob
 import threading
 import asyncio
+import atexit
+from concurrent.futures import ThreadPoolExecutor
 from filelock import SoftFileLock
 from functools import wraps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
+
+# Create a dedicated ThreadPoolExecutor for card checking operations
+# This prevents blocking the event loop when multiple users check cards simultaneously
+# Using 20 workers allows up to 20 concurrent card checks without blocking
+CARD_CHECK_EXECUTOR = ThreadPoolExecutor(max_workers=20, thread_name_prefix="card_checker")
+
+# Register cleanup function to properly shutdown the executor on exit
+def _cleanup_executor():
+    """Cleanup the card check executor on shutdown"""
+    try:
+        CARD_CHECK_EXECUTOR.shutdown(wait=False)
+    except Exception:
+        pass
+
+atexit.register(_cleanup_executor)
 
 # Import ppcp module for /pp command
 sys.path.append(os.path.join(os.path.dirname(__file__), 'ppcp'))
@@ -1977,8 +1994,10 @@ async def b3_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Send "Checking Please Wait" message
     checking_msg = await update.message.reply_text("⏳ Checking Please Wait...")
 
-    # Check the card
-    result, error_type, site_name = check_card(card_details)
+    # Check the card using run_in_executor to prevent blocking the event loop
+    # This allows other users to use the bot while this check is in progress
+    loop = asyncio.get_event_loop()
+    result, error_type, site_name = await loop.run_in_executor(CARD_CHECK_EXECUTOR, check_card, card_details)
 
     # Edit the message with the result
     await checking_msg.edit_text(result)
@@ -2150,9 +2169,9 @@ async def b3s_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # Update last check time
                     user_rate_limit[user_id] = time.time()
 
-            # Check the card using run_in_executor to not block event loop
+            # Check the card using run_in_executor with dedicated executor to not block event loop
             loop = asyncio.get_event_loop()
-            result, error_type, site_name = await loop.run_in_executor(None, check_card, card)
+            result, error_type, site_name = await loop.run_in_executor(CARD_CHECK_EXECUTOR, check_card, card)
 
             # Count approved/declined
             if "APPROVED" in result and "✅" in result:
@@ -2563,7 +2582,7 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Check the single card using PayPal Pro gateway (run in executor to not block)
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, lambda: paypalpro.check_card(normalized_cards[0], sites=sites))
+            result = await loop.run_in_executor(CARD_CHECK_EXECUTOR, lambda: paypalpro.check_card(normalized_cards[0], sites=sites))
             formatted_result = paypalpro.format_result(result)
             
             # Track gateway usage end
@@ -2655,9 +2674,9 @@ async def pro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if GATEWAY_STATS_AVAILABLE:
                         track_request_start('ppro')
                     
-                    # Check the card using run_in_executor to not block event loop
+                    # Check the card using run_in_executor with dedicated executor to not block event loop
                     loop = asyncio.get_event_loop()
-                    result = await loop.run_in_executor(None, lambda c=card: paypalpro.check_card(c, sites=sites))
+                    result = await loop.run_in_executor(CARD_CHECK_EXECUTOR, lambda c=card: paypalpro.check_card(c, sites=sites))
                     formatted_result = paypalpro.format_result(result)
                     
                     # Track gateway usage end
@@ -2914,10 +2933,10 @@ async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if GATEWAY_STATS_AVAILABLE:
                 track_request_start('st')
             
-            # Run the card check in executor to not block
+            # Run the card check in executor with dedicated executor to not block
             loop = asyncio.get_event_loop()
             raw_result = await loop.run_in_executor(
-                None, 
+                CARD_CHECK_EXECUTOR, 
                 lambda: allstripecvv.process_card(normalized_cards[0], sites_str)
             )
             
@@ -3006,10 +3025,10 @@ async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if GATEWAY_STATS_AVAILABLE:
                         track_request_start('st')
                     
-                    # Check the card using run_in_executor to not block event loop
+                    # Check the card using run_in_executor with dedicated executor to not block event loop
                     loop = asyncio.get_event_loop()
                     raw_result = await loop.run_in_executor(
-                        None, 
+                        CARD_CHECK_EXECUTOR, 
                         lambda c=card: allstripecvv.process_card(c, sites_str)
                     )
                     
